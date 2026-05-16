@@ -17,6 +17,34 @@ import bcrypt from 'bcryptjs';
 
 import { useTheme } from '../context/ThemeContext';
 
+const getGradeBadge = (grade: string | undefined | null) => {
+  if (!grade) return <span className="text-slate-400 dark:text-slate-600 font-mono">-</span>;
+  const g = grade.trim().toUpperCase();
+  let colorClasses = "";
+  
+  if (g.startsWith('A+')) {
+    colorClasses = "bg-gradient-to-r from-purple-500/15 to-fuchsia-500/15 text-purple-600 dark:text-purple-400 border-purple-500/30 shadow-[0_4px_12px_rgba(168,85,247,0.12)] ring-1 ring-purple-500/20";
+  } else if (g.startsWith('A')) {
+    colorClasses = "bg-gradient-to-r from-blue-500/15 to-indigo-500/15 text-indigo-600 dark:text-indigo-400 border-indigo-500/30 shadow-[0_4px_12px_rgba(99,102,241,0.12)] ring-1 ring-indigo-500/20";
+  } else if (g.startsWith('B')) {
+    colorClasses = "bg-gradient-to-r from-cyan-500/15 to-teal-500/15 text-cyan-600 dark:text-cyan-400 border-cyan-500/30 shadow-[0_4px_12px_rgba(6,182,212,0.12)] ring-1 ring-cyan-500/20";
+  } else if (g.startsWith('C')) {
+    colorClasses = "bg-gradient-to-r from-amber-500/15 to-yellow-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30 shadow-[0_4px_12px_rgba(245,158,11,0.12)] ring-1 ring-amber-500/20";
+  } else if (g.startsWith('D')) {
+    colorClasses = "bg-gradient-to-r from-orange-500/15 to-red-500/15 text-orange-600 dark:text-orange-400 border-orange-500/30 shadow-[0_4px_12px_rgba(249,115,22,0.12)] ring-1 ring-orange-500/20";
+  } else if (g.startsWith('F')) {
+    colorClasses = "bg-gradient-to-r from-rose-500/20 to-red-500/20 text-rose-600 dark:text-rose-400 border-rose-500/30 shadow-[0_4px_12px_rgba(244,63,94,0.12)] ring-1 ring-rose-500/20 animate-pulse";
+  } else {
+    colorClasses = "bg-gradient-to-r from-emerald-500/15 to-green-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30 shadow-[0_4px_12px_rgba(16,185,129,0.12)] ring-1 ring-emerald-500/20";
+  }
+
+  return (
+    <span className="inline-flex items-center justify-center px-3 py-1 text-[11px] font-black rounded-xl border uppercase tracking-[0.05em] font-sans transition-all duration-300 transform hover:scale-110 shadow-sm shadow-black/5 dark:shadow-white/5 bg-slate-100 dark:bg-slate-900 border-slate-250 dark:border-slate-800">
+      <span className={`${colorClasses} px-2 py-0.5 rounded-lg border border-transparent`}>{g}</span>
+    </span>
+  );
+};
+
 interface TeacherDashboardProps {
   user: Employee;
   onLogout: () => void;
@@ -38,6 +66,7 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
   const [attendanceRecords, setAttendanceRecords] = useState<Record<number, 'Present' | 'Absent' | 'Sick' | 'Leave'>>({});
   const [teacherLogs, setTeacherLogs] = useState<TeacherAttendance[]>([]);
   const [isSavingAttendance, setIsSavingAttendance] = useState(false);
+  const [touchStartX, setTouchStartX] = useState<number | null>(null);
   const [schoolName, setSchoolName] = useState<string>('');
   const [isUploadingProfile, setIsUploadingProfile] = useState(false);
   const [hasAuthSession, setHasAuthSession] = useState(false);
@@ -401,7 +430,11 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
       if (subjectData) setSubjects(subjectData);
       else if (!isSupabaseConfigured) setSubjects([{ id: 1, name: 'Mathematics', code: 'MATH101', emis: user.emis }, { id: 2, name: 'Physics', code: 'PHY101', emis: user.emis }]);
 
-      const { data: csData } = await supabase.from('class_subject').select('*').eq('emis', user.emis);
+      const { data: csData } = await supabase
+        .from('class_subject')
+        .select('*')
+        .eq('teacher_id', user.id)
+        .eq('emis', user.emis);
       if (csData) setClassSubjects(csData);
       else if (!isSupabaseConfigured) setClassSubjects([{ id: 1, class_id: 1, subject_id: 1, teacher_id: 1, total_marks: 100, passing_marks: 33, emis: user.emis }]);
 
@@ -690,6 +723,29 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
     }
   };
 
+  useEffect(() => {
+    if (selectedSessionId && selectedSemesterId && selectedClassSubjectId && examResults.length > 0) {
+      const classSub = classSubjects.find(cs => cs.id === parseInt(selectedClassSubjectId));
+      if (!classSub) return;
+      
+      const newMarksData: Record<number, number> = {};
+      sortedStudents.forEach(student => {
+        const existing = examResults.find(r => 
+          r.student_id === student.id && 
+          r.session_id === parseInt(selectedSessionId) && 
+          r.semester_id === parseInt(selectedSemesterId) &&
+          r.subject_id === classSub.subject_id
+        );
+        if (existing) {
+          newMarksData[student.id] = existing.obtained_marks;
+        }
+      });
+      setMarksEntryData(newMarksData);
+    } else {
+      setMarksEntryData({});
+    }
+  }, [selectedSessionId, selectedSemesterId, selectedClassSubjectId, examResults, sortedStudents, classSubjects]);
+
   const saveMarks = async (e: FormEvent) => {
     e.preventDefault();
     if (!selectedSessionId || !selectedSemesterId || !selectedClassSubjectId) {
@@ -698,6 +754,13 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
     }
     const classSub = classSubjects.find(cs => cs.id === parseInt(selectedClassSubjectId));
     if (!classSub) return;
+
+    // Validation: check if any mark exceeds total_marks
+    const invalidEntries = Object.entries(marksEntryData).filter(([_, marks]) => (marks as number) > classSub.total_marks);
+    if (invalidEntries.length > 0) {
+      alert(`Validation Error: One or more entries exceed the maximum marks allowed (${classSub.total_marks}).`);
+      return;
+    }
 
     setIsSavingMarks(true);
     try {
@@ -714,6 +777,13 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
         emis: user.emis,
         grade: (marks as number) >= (classSub.total_marks * 0.9) ? 'A+' : (marks as number) >= (classSub.total_marks * 0.8) ? 'A' : (marks as number) >= (classSub.total_marks * 0.7) ? 'B' : (marks as number) >= (classSub.total_marks * 0.6) ? 'C' : (marks as number) >= classSub.passing_marks ? 'D' : 'F'
       }));
+
+      // Only save if there are results (or if we want to allow clearing)
+      if (resultsToSave.length === 0) {
+        alert('No data points detected for synchronization');
+        setIsSavingMarks(false);
+        return;
+      }
 
       if (isSupabaseConfigured) {
         const { error } = await supabase.from('exam_results').upsert(resultsToSave, { onConflict: 'student_id,class_id,subject_id,session_id,semester_id' });
@@ -1588,14 +1658,40 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
                     <div className="space-y-2">
                       {sortedStudents.map((student, i) => {
                         const status = attendanceRecords[student.id] || 'Present';
+                        const rowColor = status === 'Absent' 
+                          ? 'bg-rose-500/5 border-rose-500/20' 
+                          : status === 'Sick' || status === 'Leave'
+                          ? 'bg-amber-500/5 border-amber-500/20'
+                          : 'bg-card border-border';
+
                         return (
-                          <div key={`teacher-att-student-${student.id || `idx-${i}`}`} className="bg-card border border-border p-4 rounded-xl flex items-center justify-between shadow-sm">
+                          <div 
+                            key={`teacher-att-student-${student.id || `idx-${i}`}`} 
+                            onTouchStart={(e) => setTouchStartX(e.touches[0].clientX)}
+                            onTouchEnd={(e) => {
+                              if (touchStartX === null) return;
+                              const deltaX = e.changedTouches[0].clientX - touchStartX;
+                              if (deltaX < -50) { 
+                                updateAttendanceStatus(student.id, 'Absent');
+                              } else if (deltaX > 50) {
+                                updateAttendanceStatus(student.id, 'Present');
+                              }
+                              setTouchStartX(null);
+                            }}
+                            className={`${rowColor} border p-4 rounded-xl flex items-center justify-between shadow-sm transition-all duration-300 relative overflow-hidden`}
+                          >
+                             {status === 'Absent' && (
+                               <div className="absolute left-0 top-0 bottom-0 w-1 bg-rose-500" />
+                             )}
                              <div className="flex items-center gap-3">
-                                <div className="w-8 h-8 rounded-full bg-slate-50 dark:bg-slate-800 flex items-center justify-center text-[10px] font-bold text-slate-400 border border-slate-100 dark:border-slate-700">
+                                <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-bold border transition-all ${
+                                  status === 'Absent' ? 'bg-rose-500/10 text-rose-500 border-rose-500/20' : 
+                                  'bg-slate-50 dark:bg-slate-800 text-slate-400 border-slate-100 dark:border-slate-700'
+                                }`}>
                                    {(student.name || 'A').charAt(0)}
                                 </div>
                                 <div>
-                                  <span className="text-xs font-medium text-slate-900 dark:text-white block">{student.name || 'Anonymous Student'}</span>
+                                  <span className={`text-xs font-medium block transition-colors ${status === 'Absent' ? 'text-rose-500' : 'text-slate-900 dark:text-white'}`}>{student.name || 'Anonymous Student'}</span>
                                   <span className="text-[8px] text-slate-500 dark:text-slate-600 font-mono">ADM: {student.admission_no || 'N/A'}</span>
                                 </div>
                              </div>
@@ -1603,7 +1699,7 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
                                    <div className="flex gap-1.5">
                                       {[
                                         { label: 'P', value: 'Present' as const, color: 'emerald' },
-                                        { label: 'A', value: 'Absent' as const, color: 'red' },
+                                        { label: 'A', value: 'Absent' as const, color: 'rose' },
                                         { label: 'S', value: 'Sick' as const, color: 'amber' },
                                         { label: 'L', value: 'Leave' as const, color: 'blue' }
                                       ].map((btn) => (
@@ -2072,7 +2168,7 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
                       className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none"
                     >
                       <option value="">Select Class</option>
-                      {allClasses.map(c => (
+                      {assignedClasses.map(c => (
                         <option key={`enroll-cls-opt-${c.id}`} value={c.id}>{c.class_name}</option>
                       ))}
                     </select>
@@ -2150,7 +2246,7 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
                     className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none"
                   >
                     <option value="">Select Subject</option>
-                    {classSubjects.filter(cs => cs.teacher_id === user.id).map(cs => {
+                    {classSubjects.map(cs => {
                         const subj = subjects.find(s => s.id === cs.subject_id);
                         const cls = allClasses.find(c => c.id === cs.class_id);
                         return <option key={`sel-cs-${cs.id}`} value={cs.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">{cls?.class_name || cls?.name} - {subj?.name}</option>
@@ -2161,6 +2257,53 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
 
               {marksMode === 'entry' && selectedClassSubjectId && (
                 <div className="space-y-6 pt-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-2">
+                    <div className="bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 p-4 rounded-2xl">
+                      <p className="text-[7px] text-slate-500 font-bold uppercase tracking-[0.2em] mb-1">Max Recordable</p>
+                      <p className="text-xl text-slate-900 dark:text-white font-black">{classSubjects.find(cs => cs.id === parseInt(selectedClassSubjectId))?.total_marks}</p>
+                    </div>
+                    <div className="bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 p-4 rounded-2xl">
+                      <p className="text-[7px] text-slate-500 font-bold uppercase tracking-[0.2em] mb-1">Class Strength</p>
+                      <p className="text-xl text-slate-900 dark:text-white font-black">{sortedStudents.length}</p>
+                    </div>
+                    <div className="bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 p-4 rounded-2xl">
+                      <p className="text-[7px] text-emerald-500 font-bold uppercase tracking-[0.2em] mb-1">Qualified Ratio</p>
+                      <p className="text-xl text-slate-900 dark:text-white font-black">
+                        {(() => {
+                           const cs = classSubjects.find(x => x.id === parseInt(selectedClassSubjectId));
+                           const passed = sortedStudents.filter(s => {
+                             const res = examResults.find(r => 
+                               r.student_id === s.id && 
+                               r.session_id === parseInt(selectedSessionId) && 
+                               r.semester_id === parseInt(selectedSemesterId) &&
+                               r.subject_id === cs?.subject_id
+                             );
+                             const m = marksEntryData[s.id] ?? res?.obtained_marks;
+                             return m !== undefined && m >= (cs?.passing_marks || 0);
+                           }).length;
+                           return sortedStudents.length > 0 ? `${Math.round((passed / sortedStudents.length) * 100)}%` : '0%';
+                        })()}
+                      </p>
+                    </div>
+                    <div className="bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 p-4 rounded-2xl">
+                      <p className="text-[7px] text-amber-500 font-bold uppercase tracking-[0.2em] mb-1">Mean Score</p>
+                      <p className="text-xl text-slate-900 dark:text-white font-black">
+                        {(() => {
+                          const cs = classSubjects.find(x => x.id === parseInt(selectedClassSubjectId));
+                          const filtered = sortedStudents.map(s => {
+                            const res = examResults.find(r => 
+                              r.student_id === s.id && 
+                              r.session_id === parseInt(selectedSessionId) && 
+                              r.semester_id === parseInt(selectedSemesterId) &&
+                              r.subject_id === cs?.subject_id
+                            );
+                            return marksEntryData[s.id] ?? res?.obtained_marks;
+                          }).filter(v => v !== undefined) as number[];
+                          return filtered.length > 0 ? (filtered.reduce((a,b) => a+b, 0) / filtered.length).toFixed(1) : '0.0';
+                        })()}
+                      </p>
+                    </div>
+                  </div>
                   <div className="overflow-x-auto">
                     <table className="w-full text-left border-collapse">
                       <thead>
@@ -2185,21 +2328,57 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
                               r.subject_id === classSubjects.find(cs => cs.id === parseInt(selectedClassSubjectId))?.subject_id
                           );
                           return (
-                            <tr key={`marks-row-${student.id}`} className="border-b border-slate-100 dark:border-slate-800/50 hover:bg-slate-50/50 transition-colors">
+                            <tr key={`marks-row-${student.id}`} className="border-b border-slate-100 dark:border-slate-800/50 hover:bg-emerald-500/5 transition-colors group">
                               <td className="py-4">
-                                <p className="text-[10px] font-bold uppercase text-slate-900 dark:text-white">{student.name}</p>
-                                <p className="text-[8px] text-slate-500 font-mono tracking-widest">{student.admission_no}</p>
+                                <div className="flex items-center gap-3">
+                                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-bold border transition-all ${existingRes ? (existingRes.obtained_marks >= (classSubjects.find(cs => cs.id === parseInt(selectedClassSubjectId))?.passing_marks || 0) ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-500' : 'bg-red-500/10 border-red-500/20 text-red-500') : 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-400'}`}>
+                                    {student.name.charAt(0).toUpperCase()}
+                                  </div>
+                                  <div>
+                                    <p className="text-[10px] font-bold uppercase text-slate-900 dark:text-white group-hover:text-emerald-500 transition-colors">{student.name}</p>
+                                    <p className="text-[8px] text-slate-500 font-mono tracking-widest">{student.admission_no}</p>
+                                  </div>
+                                </div>
                               </td>
                               <td className="py-4">
-                                <input 
-                                  type="number"
-                                  defaultValue={existingRes?.obtained_marks}
-                                  onChange={(e) => setMarksEntryData(prev => ({...prev, [student.id]: parseInt(e.target.value)}))}
-                                  className="w-20 bg-white dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-lg px-2 py-1 text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none"
-                                />
+                                <div className="relative inline-block">
+                                  <input 
+                                    type="number"
+                                    value={marksEntryData[student.id] ?? ''}
+                                    onChange={(e) => {
+                                      const val = e.target.value === '' ? undefined : parseInt(e.target.value);
+                                      setMarksEntryData(prev => {
+                                        const next = {...prev};
+                                        if (val === undefined) delete next[student.id];
+                                        else next[student.id] = val;
+                                        return next;
+                                      });
+                                    }}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') {
+                                        e.preventDefault();
+                                        const inputs = Array.from(document.querySelectorAll('input[type="number"]'));
+                                        const index = inputs.indexOf(e.currentTarget as HTMLInputElement);
+                                        if (index < inputs.length - 1) (inputs[index + 1] as HTMLInputElement).focus();
+                                      }
+                                    }}
+                                    className={`w-24 bg-white dark:bg-[#020617] border rounded-xl px-3 py-2 text-xs text-slate-900 dark:text-white transition-all outline-none 
+                                      ${(marksEntryData[student.id] ?? 0) > (classSubjects.find(cs => cs.id === parseInt(selectedClassSubjectId))?.total_marks || 0) ? 'border-amber-500 bg-amber-500/5' : 
+                                        marksEntryData[student.id] !== undefined ? 
+                                          (marksEntryData[student.id]! >= (classSubjects.find(cs => cs.id === parseInt(selectedClassSubjectId))?.passing_marks || 0) ? 'border-emerald-500/50 focus:border-emerald-500' : 'border-red-500/50 focus:border-red-500') : 
+                                          'border-slate-200 dark:border-slate-800 focus:border-emerald-500'}`}
+                                  />
+                                </div>
                               </td>
-                              <td className="py-4 text-[8px] font-mono text-slate-400">
-                                  {existingRes ? `Recorded: ${existingRes.obtained_marks}` : 'IDLE'}
+                              <td className="py-4 font-mono">
+                                  {existingRes ? (
+                                    <div className="flex flex-col gap-1">
+                                      <span className={`text-[8px] font-bold uppercase px-2 py-0.5 rounded-full inline-block w-fit ${existingRes.obtained_marks >= existingRes.passing_marks ? 'bg-emerald-500/10 text-emerald-500' : 'bg-red-500/10 text-red-500'}`}>
+                                        {existingRes.obtained_marks >= existingRes.passing_marks ? 'QUALIFIED' : 'RETAKE REQ'}
+                                      </span>
+                                      <span className="text-[7px] text-slate-400">Archived: {existingRes.obtained_marks}/{existingRes.total_marks}</span>
+                                    </div>
+                                  ) : <span className="text-[8px] text-slate-300 uppercase tracking-widest">NO RECORD</span>}
                               </td>
                             </tr>
                           );
@@ -2221,40 +2400,40 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
                 <div className="space-y-6 pt-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
                    <div className="flex items-center justify-between pb-4 border-b border-slate-200 dark:border-slate-800">
                      <div>
-                       <h4 className="text-xs font-bold uppercase tracking-widest text-[#10b981]">Consolidated Award List</h4>
-                       <p className="text-[9px] text-slate-500 uppercase tracking-widest">
-                         {allClasses.find(c => c.id === classSubjects.find(cs => cs.id === parseInt(selectedClassSubjectId))?.class_id)?.class_name} - {subjects.find(s => s.id === classSubjects.find(cs => cs.id === parseInt(selectedClassSubjectId))?.subject_id)?.name}
+                       <h4 className="text-xs font-black uppercase tracking-[0.2em] text-transparent bg-clip-text bg-gradient-to-r from-emerald-500 to-teal-400">Consolidated Award List</h4>
+                       <p className="text-[9px] text-slate-400 dark:text-slate-500 font-bold uppercase tracking-widest mt-1">
+                         {allClasses.find(c => c.id === classSubjects.find(cs => cs.id === parseInt(selectedClassSubjectId))?.class_id)?.class_name} — {subjects.find(s => s.id === classSubjects.find(cs => cs.id === parseInt(selectedClassSubjectId))?.subject_id)?.name}
                        </p>
                      </div>
-                     <div className="flex items-center gap-2">
+                     <div className="flex items-center gap-3">
                        <button 
                          onClick={downloadAwardList}
                          disabled={!selectedClassSubjectId}
-                         className="flex items-center gap-2 px-4 py-2 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 rounded-xl text-[8px] font-bold uppercase tracking-widest hover:bg-slate-200 dark:hover:bg-slate-700 transition"
+                         className="flex items-center gap-2.5 px-6 py-3 bg-gradient-to-r from-teal-500 to-emerald-650 dark:from-teal-600 dark:to-emerald-755 text-white rounded-2xl text-[9px] font-black uppercase tracking-[0.21em] hover:brightness-110 active:scale-95 transition-all disabled:opacity-35 shadow-lg shadow-emerald-500/15 dark:shadow-emerald-500/5 cursor-pointer"
                        >
-                         <Download className="w-3 h-3" /> Export Award List
+                         <FileText className="w-4 h-4 text-emerald-100 animate-pulse" /> Excel Sheet
                        </button>
-                       <button onClick={() => window.print()} className="p-3 bg-slate-100 dark:bg-slate-800 rounded-2xl hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors shadow-sm">
+                       <button onClick={() => window.print()} className="p-3 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700/80 rounded-2xl transition-colors shadow-sm">
                           <History className="w-4 h-4 text-slate-500 dark:text-slate-400" />
                        </button>
                      </div>
                    </div>
-                   <div className="overflow-x-auto rounded-3xl border border-slate-200 dark:border-slate-800">
+                   <div className="overflow-x-auto rounded-3xl border border-slate-200/60 dark:border-slate-800/80 shadow-xl shadow-black/5 dark:shadow-black/20">
                      <table className="w-full text-left border-collapse">
-                       <thead className="bg-slate-50 dark:bg-[#020617]">
+                       <thead className="bg-slate-50 dark:bg-[#020617] border-b border-slate-200/50 dark:border-slate-800/80">
                          <tr>
-                           <th className="p-4 text-[8px] font-bold uppercase tracking-widest text-slate-500 cursor-pointer hover:text-emerald-500 transition-colors" onClick={toggleSort}>
+                           <th className="px-10 py-5 text-[8px] font-black uppercase tracking-[0.15em] text-slate-400 cursor-pointer hover:text-indigo-500 transition-colors" onClick={toggleSort}>
                              <div className="flex items-center gap-1 justify-center">
-                               {sortDirection === 'asc' ? <ArrowUp className="w-2.5 h-2.5" /> : sortDirection === 'desc' ? <ArrowDown className="w-2.5 h-2.5" /> : <ArrowUpDown className="w-3 h-3" />}
+                               {sortDirection === 'asc' ? <ArrowUp className="w-2.5 h-2.5" /> : sortDirection === 'desc' ? <ArrowDown className="w-2.5 h-2.5" /> : <ArrowUpDown className="w-3 h-3 text-slate-400" />}
                                Admission No
                              </div>
                            </th>
-                           <th className="p-4 text-[8px] font-bold uppercase tracking-widest text-slate-500">Student Identity</th>
-                           <th className="p-4 text-[8px] font-bold uppercase tracking-widest text-slate-500 text-center">Base</th>
-                           <th className="p-4 text-[8px] font-bold uppercase tracking-widest text-slate-500 text-center">Score</th>
-                           <th className="p-4 text-[8px] font-bold uppercase tracking-widest text-slate-500 text-center">Rank</th>
-                           <th className="p-4 text-[8px] font-bold uppercase tracking-widest text-slate-500 text-center">Judgement</th>
-                            <th className="p-4 text-[8px] font-bold uppercase tracking-widest text-slate-500 text-center">Actions</th>
+                           <th className="px-10 py-5 text-[8px] font-black uppercase tracking-[0.15em] text-slate-400">Student Identity</th>
+                           <th className="px-10 py-5 text-[8px] font-black uppercase tracking-[0.15em] text-slate-400 text-center">Base</th>
+                           <th className="px-10 py-5 text-[8px] font-black uppercase tracking-[0.15em] text-slate-400 text-center">Score</th>
+                           <th className="px-10 py-5 text-[8px] font-black uppercase tracking-[0.15em] text-slate-400 text-center">Rank</th>
+                           <th className="px-10 py-5 text-[8px] font-black uppercase tracking-[0.15em] text-slate-400 text-center">Judgement</th>
+                           <th className="px-10 py-5 text-[8px] font-black uppercase tracking-[0.15em] text-slate-400 text-center">Actions</th>
                          </tr>
                        </thead>
                        <tbody>
@@ -2265,36 +2444,74 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
                               r.semester_id === parseInt(selectedSemesterId) &&
                               r.subject_id === classSubjects.find(cs => cs.id === parseInt(selectedClassSubjectId))?.subject_id
                            );
+                           const percent = res ? (res.obtained_marks / res.total_marks) * 100 : 0;
                            return (
-                             <tr key={`award-row-${student.id}`} className="border-b border-slate-100 dark:border-slate-800/50 hover:bg-slate-50/50 transition-colors">
-                               <td className="p-4 text-[10px] font-mono text-slate-500">{student.admission_no}</td>
-                               <td className="p-4">
+                             <tr key={`award-row-${student.id}`} className="hover:bg-indigo-500/5 dark:hover:bg-indigo-500/5 transition-all group border-b border-slate-100 dark:border-slate-800/80">
+                               <td className="px-10 py-6">
+                                 <span className="font-mono text-[9px] font-black uppercase tracking-[0.05em] bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 px-3 py-1.5 rounded-lg border border-slate-200/50 dark:border-slate-700/50 shadow-sm">
+                                   {student.admission_no}
+                                 </span>
+                               </td>
+                               <td className="px-10 py-6">
                                  <button 
                                    onClick={() => setViewingStudentDMC(student)}
-                                   className="text-[10px] font-bold uppercase text-slate-900 dark:text-white hover:text-emerald-500 transition-colors"
+                                   className="text-[11px] font-black text-slate-900 dark:text-white uppercase tracking-widest group-hover:text-indigo-500 transition-colors duration-200 text-left"
                                  >
                                    {student.name}
                                  </button>
                                </td>
-                               <td className="p-4 text-[10px] text-center text-slate-600 dark:text-slate-400 font-mono">{res?.total_marks || '-'}</td>
-                               <td className="p-4 text-[10px] text-center font-bold text-slate-900 dark:text-white font-mono">{res?.obtained_marks || '00'}</td>
-                               <td className="p-4 text-[10px] text-center font-bold text-emerald-500">{res?.grade || '-'}</td>
-                               <td className="p-4 text-center">
-                                 {res ? (
-                                   <span className={`px-3 py-1 text-[8px] font-bold uppercase tracking-widest rounded-full ${res.obtained_marks >= res.passing_marks ? 'bg-emerald-500/10 text-emerald-500 ring-1 ring-emerald-500/20' : 'bg-red-500/10 text-red-500 ring-1 ring-red-500/20'}`}>
-                                     {res.obtained_marks >= res.passing_marks ? 'QUALIFIED' : 'FAILED'}
-                                   </span>
-                                 ) : <span className="text-[8px] text-slate-300 uppercase tracking-widest">PENDING</span>}
+                               <td className="px-10 py-6 text-center">
+                                 <span className="inline-flex items-center justify-center px-3 py-1 text-[10px] font-mono font-bold rounded-lg bg-slate-100 dark:bg-slate-800/70 border border-slate-200/50 dark:border-slate-700/20 text-slate-500 dark:text-slate-400">
+                                   {res?.total_marks || '-'}
+                                 </span>
                                </td>
-                               <td className="p-4 text-center">
+                               <td className="px-10 py-6 text-center">
+                                 <span className="inline-flex items-center justify-center px-3 py-1 text-[11px] font-mono font-black rounded-lg bg-indigo-500/5 dark:bg-indigo-500/10 text-slate-850 dark:text-indigo-300 border border-indigo-500/20 shadow-sm">
+                                   {res?.obtained_marks || '00'}
+                                 </span>
+                               </td>
+                               <td className="px-10 py-6 text-center">
+                                 {getGradeBadge(res?.grade)}
+                               </td>
+                               <td className="px-10 py-6 text-center">
+                                 {res ? (
+                                   res.obtained_marks >= res.passing_marks ? (
+                                     <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-2xl border font-black text-[9px] uppercase tracking-[0.15em] bg-gradient-to-r from-emerald-500/15 to-teal-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30 shadow-[0_0_15px_rgba(16,185,129,0.1)] ring-1 ring-emerald-500/20 transition-all duration-300 hover:scale-[1.02]">
+                                        <span className="relative flex h-2 w-2">
+                                           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                           <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                                        </span>
+                                        <span>QUALIFIED</span>
+                                        <span className="text-slate-300 dark:text-slate-700">|</span>
+                                        <span className="font-mono font-black text-emerald-500">{Math.round(percent)}%</span>
+                                     </div>
+                                   ) : (
+                                     <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-2xl border font-black text-[9px] uppercase tracking-[0.15em] bg-gradient-to-r from-rose-500/15 to-red-500/10 text-rose-600 dark:text-rose-400 border-rose-500/30 shadow-[0_0_15px_rgba(244,63,94,0.1)] ring-1 ring-rose-500/20 transition-all duration-300 hover:scale-[1.02]">
+                                        <span className="relative flex h-2 w-2">
+                                           <span className="animate-pulse absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+                                           <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
+                                        </span>
+                                        <span>FAILED</span>
+                                        <span className="text-slate-300 dark:text-slate-700">|</span>
+                                        <span className="font-mono font-black text-rose-500">{Math.round(percent)}%</span>
+                                     </div>
+                                   )
+                                 ) : (
+                                   <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-2xl border font-black text-[9px] uppercase tracking-[0.15em] bg-slate-100 dark:bg-slate-800/80 text-amber-600 dark:text-amber-400 border-amber-500/20 shadow-sm shadow-amber-500/5 animate-pulse">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                                      <span>PENDING</span>
+                                   </div>
+                                 )}
+                               </td>
+                               <td className="px-10 py-6 text-center">
                                  <button 
                                    onClick={() => setViewingStudentDMC(student)}
                                    title="View DMC"
-                                   className="p-2 text-slate-400 hover:text-emerald-500 transition-colors"
+                                   className="p-2 text-indigo-500 hover:text-indigo-650 dark:text-indigo-400 dark:hover:text-indigo-300 transform hover:scale-115 transition-all duration-200"
                                  >
                                    <Eye className="w-4 h-4" />
                                  </button>
-                                </td>
+                               </td>
                              </tr>
                            )
                          })}

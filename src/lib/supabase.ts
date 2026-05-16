@@ -11,4 +11,3 @@ if (!supabaseUrl || !supabaseAnonKey) {
 const validUrl = supabaseUrl && supabaseUrl.startsWith('http') ? supabaseUrl : 'https://placeholder.supabase.co';
 
 export const supabase = createClient(validUrl, supabaseAnonKey || 'placeholder');
-

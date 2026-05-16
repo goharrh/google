@@ -215,71 +215,125 @@ export default function Login({ onLoginSuccess }: LoginProps) {
     }
 
     try {
-      // In a real app with Supabase:
       const isEmail = trimmedCnic.includes('@');
-      const { data: emp, error: empError } = await supabase
-        .from('emp')
-        .select('*')
-        .or(isEmail ? `email.eq."${trimmedCnic}"` : `cnic.eq."${trimmedCnic}",username.eq."${trimmedCnic}"`)
-        .maybeSingle();
+      let emp = null;
+      let session = null;
+      let resolvedEmail = isEmail ? trimmedCnic : null;
 
-      if (empError) {
-        throw new Error(`Database Error: ${empError.message}`);
+      // STEP 1: If it's a CNIC or Username, attempt to resolve the email through a secure RPC function.
+      // Postgres Security Definer Functions bypass RLS and are the standard secure way to map CNIC -> Email.
+      if (!isEmail) {
+        console.log('Attempting to resolve CNIC/Username via secure RPC...');
+        try {
+          const { data, error: rpcError } = await supabase
+            .rpc('get_emp_email_by_login', { p_login: trimmedCnic });
+          
+          if (!rpcError && data) {
+            console.log('Successfully resolved login identifier to email via RPC:', data);
+            resolvedEmail = data;
+          } else if (rpcError) {
+            console.warn('RPC lookup returned error or function not installed. Fallback to direct check.', rpcError.message);
+          }
+        } catch (rpcErr) {
+          console.warn('RPC exception. Fallback to direct check.', rpcErr);
+        }
+      }
+
+      // STEP 2: Dual Path Authentication Strategy
+      // Path A: If we have an email (resolved or direct), attempt Supabase Auth Sign-In FIRST.
+      // This is crucial because when RLS is enabled, they MUST be authenticated with Supabase to select from 'emp'!
+      if (resolvedEmail) {
+        console.log(`Attempting Supabase Auth sign-in for: ${resolvedEmail}...`);
+        const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+          email: resolvedEmail,
+          password: trimmedPassword,
+        });
+
+        if (!authError && authData.session) {
+          console.log('Auth sign-in successful. Fetching profile using authenticated session...');
+          session = authData.session;
+          
+          // Now that we are signed in, the authenticated session lets us read the employee record
+          const { data: authenticatedEmp, error: fetchError } = await supabase
+            .from('emp')
+            .select('*')
+            .eq('email', resolvedEmail)
+            .maybeSingle();
+
+          if (!fetchError && authenticatedEmp) {
+            emp = authenticatedEmp;
+          } else {
+            console.warn('Auth succeeded but profile fetch failed (possible missing RLS policy for reading own profile):', fetchError);
+          }
+        } else {
+          console.warn('Auth sign-in failed, checking custom database credentials path...', authError?.message);
+        }
+      }
+
+      // Path B: Fallback / Initial Database Fetch (e.g. if Auth failed because user doesn't exist in Supabase Auth yet, OR if no email is resolved)
+      if (!emp) {
+        console.log('Attempting custom direct database credentials verification...');
+        
+        // Query the 'emp' table.
+        // NOTE: If RLS is enabled, this will only return rows if the user has a SELECT policy allowing it,
+        // or if they run the RPC or policy we provide.
+        const { data: tempEmp, error: dbError } = await supabase
+          .from('emp')
+          .select('*')
+          .or(isEmail ? `email.eq."${trimmedCnic}"` : `cnic.eq."${trimmedCnic}",username.eq."${trimmedCnic}"`)
+          .maybeSingle();
+
+        if (dbError) {
+          console.error('Database query error:', dbError);
+          throw new Error(`Connection Error: ${dbError.message}. If Row-Level Security (RLS) is active on the 'emp' table, you must add policies or use the SQL functions provided.`);
+        }
+
+        if (!tempEmp) {
+          throw new Error('Record not found. Ensure your CNIC/Email is correct, or if RLS is enabled on your database, configure the required SELECT policies or get_emp_email_by_login RPC function.');
+        }
+
+        // Verify password with Bcrypt
+        const isPasswordValid = tempEmp.password && (
+          bcrypt.compareSync(trimmedPassword, tempEmp.password) || 
+          trimmedPassword === tempEmp.password
+        );
+        
+        if (!isPasswordValid) {
+          throw new Error('Invalid CNIC, Email, or Password');
+        }
+
+        emp = tempEmp;
+
+        // Sync with Supabase Auth dynamically if not done yet
+        if (emp.email) {
+          console.log('Creating/Syncing Supabase Auth account for verified employee...');
+          const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+            email: emp.email,
+            password: trimmedPassword,
+            options: {
+              data: {
+                name: emp.name,
+                role: emp.role,
+                cnic: emp.cnic
+              }
+            }
+          });
+
+          if (!signUpError && signUpData.session) {
+            session = signUpData.session;
+          } else if (signUpError) {
+            console.warn('Auth creation/sync failed (SignUp):', signUpError.message);
+          }
+        }
       }
 
       if (!emp) {
-        throw new Error('Invalid Credentials');
-      }
-
-      // Verify password (support both bcrypt and plain text for existing DBs)
-      const isPasswordValid = emp.password && (
-        bcrypt.compareSync(trimmedPassword, emp.password) || 
-        trimmedPassword === emp.password
-      );
-      
-      if (!isPasswordValid) {
-        throw new Error('Invalid CNIC or Password');
-      }
-
-      // If we have a real Supabase URL, attempt a real Auth sign-in to satisfy RLS
-      let session = null;
-      if (import.meta.env.VITE_SUPABASE_URL && emp.email) {
-        const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
-          email: emp.email,
-          password: trimmedPassword,
-        });
-        
-        if (authError) {
-          if (authError.message === 'Invalid login credentials') {
-            // Attempt a silent signup if they don't exist in Auth yet
-            const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-              email: emp.email,
-              password: trimmedPassword,
-              options: {
-                data: {
-                  name: emp.name,
-                  role: emp.role,
-                  cnic: emp.cnic
-                }
-              }
-            });
-
-            if (signUpError) {
-              console.warn('Supabase Auth sync failed (SignUp):', signUpError.message);
-            } else {
-              console.log('User synced with Supabase Auth successfully.');
-              session = signUpData.session;
-            }
-          } else {
-            console.warn('Supabase Auth sign-in failed:', authError.message);
-          }
-        } else {
-          session = authData.session;
-        }
+        throw new Error('Authentication failed: Could not retrieve employee profile.');
       }
 
       onLoginSuccess(emp, session);
     } catch (err: any) {
+      console.error('Login process exception:', err);
       setError(err.message || 'Authentication failed');
     } finally {
       setIsLoading(false);

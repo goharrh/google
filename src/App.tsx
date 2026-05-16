@@ -111,9 +111,9 @@ export default function App() {
     };
   }, []);
 
-  const fetchProfile = async (email: string): Promise<boolean> => {
+  const fetchProfile = async (email: string, attempt = 1): Promise<boolean> => {
     if (!isSupabaseConfigured) return false;
-    console.log('App: Fetching profile for:', email);
+    console.log(`App: Fetching profile for: ${email} (Attempt ${attempt})`);
     try {
       setProfileError(null);
       
@@ -124,12 +124,12 @@ export default function App() {
         .maybeSingle();
       
       const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Profile sync timeout - database response delayed. This usually happens due to network latency or database load.')), 60000)
+        setTimeout(() => reject(new Error('Profile sync timeout - database response delayed.')), 30000)
       );
 
-      console.time('fetchProfile');
+      console.time(`fetchProfile-${attempt}`);
       const { data, error } = await (Promise.race([fetchPromise, timeoutPromise]) as any);
-      console.timeEnd('fetchProfile');
+      console.timeEnd(`fetchProfile-${attempt}`);
 
       if (error) {
         console.error('App: Supabase error fetching profile:', error);
@@ -142,11 +142,21 @@ export default function App() {
         return true;
       } else {
         console.warn('App: No profile found in emp table for email:', email);
+        if (attempt < 3) {
+          console.log(`App: Retrying profile fetch in ${attempt * 2000}ms...`);
+          await new Promise(r => setTimeout(r, attempt * 2000));
+          return fetchProfile(email, attempt + 1);
+        }
         setProfileError(`Account synchronization failed: No employee record found for ${email}. Please contact your administrator.`);
         return false;
       }
     } catch (err: any) {
       console.error('App: Error fetching profile:', err);
+      if (attempt < 3) {
+        console.log(`App: Retrying profile fetch after error in ${attempt * 2000}ms...`);
+        await new Promise(r => setTimeout(r, attempt * 2000));
+        return fetchProfile(email, attempt + 1);
+      }
       setProfileError(`Link lost: ${err.message || 'Unknown protocol error'}`);
       return false;
     }

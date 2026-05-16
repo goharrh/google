@@ -5,7 +5,7 @@ import {
   UserCheck, UserX, FileText, CheckCircle, Search, 
   Filter, MoreVertical, Briefcase, Award, User, ChevronRight, ChevronLeft, ChevronDown, UserPlus, UserMinus, Clock, X, Trash2, Plus, Edit,
   ClipboardList, BookOpen, GraduationCap, Layers, Bell, Star,
-  ArrowUpDown, ArrowUp, ArrowDown
+  ArrowUpDown, ArrowUp, ArrowDown, Upload, Database, AlertTriangle
 } from 'lucide-react';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, 
@@ -22,6 +22,34 @@ import * as XLSX from 'xlsx';
 
 import { useTheme } from '../context/ThemeContext';
 
+const getGradeBadge = (grade: string | undefined | null) => {
+  if (!grade) return <span className="text-slate-400 dark:text-slate-600 font-mono">-</span>;
+  const g = grade.trim().toUpperCase();
+  let colorClasses = "";
+  
+  if (g.startsWith('A+')) {
+    colorClasses = "bg-gradient-to-r from-purple-500/15 to-fuchsia-500/15 text-purple-600 dark:text-purple-400 border-purple-500/30 shadow-[0_4px_12px_rgba(168,85,247,0.12)] ring-1 ring-purple-500/20";
+  } else if (g.startsWith('A')) {
+    colorClasses = "bg-gradient-to-r from-blue-500/15 to-indigo-500/15 text-indigo-600 dark:text-indigo-400 border-indigo-500/30 shadow-[0_4px_12px_rgba(99,102,241,0.12)] ring-1 ring-indigo-500/20";
+  } else if (g.startsWith('B')) {
+    colorClasses = "bg-gradient-to-r from-cyan-500/15 to-teal-500/15 text-cyan-600 dark:text-cyan-400 border-cyan-500/30 shadow-[0_4px_12px_rgba(6,182,212,0.12)] ring-1 ring-cyan-500/20";
+  } else if (g.startsWith('C')) {
+    colorClasses = "bg-gradient-to-r from-amber-500/15 to-yellow-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30 shadow-[0_4px_12px_rgba(245,158,11,0.12)] ring-1 ring-amber-500/20";
+  } else if (g.startsWith('D')) {
+    colorClasses = "bg-gradient-to-r from-orange-500/15 to-red-500/15 text-orange-600 dark:text-orange-400 border-orange-500/30 shadow-[0_4px_12px_rgba(249,115,22,0.12)] ring-1 ring-orange-500/20";
+  } else if (g.startsWith('F')) {
+    colorClasses = "bg-gradient-to-r from-rose-500/20 to-red-500/20 text-rose-600 dark:text-rose-400 border-rose-500/30 shadow-[0_4px_12px_rgba(244,63,94,0.12)] ring-1 ring-rose-500/20 animate-pulse";
+  } else {
+    colorClasses = "bg-gradient-to-r from-emerald-500/15 to-green-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30 shadow-[0_4px_12px_rgba(16,185,129,0.12)] ring-1 ring-emerald-500/20";
+  }
+
+  return (
+    <span className="inline-flex items-center justify-center px-3 py-1 text-[11px] font-black rounded-xl border uppercase tracking-[0.05em] font-sans transition-all duration-300 transform hover:scale-110 shadow-sm shadow-black/5 dark:shadow-white/5 bg-slate-100 dark:bg-slate-900 border-slate-250 dark:border-slate-800">
+      <span className={`${colorClasses} px-2 py-0.5 rounded-lg border border-transparent`}>{g}</span>
+    </span>
+  );
+};
+
 interface AdminDashboardProps {
   user: Employee;
   onLogout: () => void;
@@ -31,7 +59,7 @@ type AdminTab = 'home' | 'teachers' | 'classes' | 'reports' | 'calendar' | 'exam
 type AdminSubTab = 
   | 'exam-marking' | 'exam-results' 
   | 'class-attendance' | 'class-manage'
-  | 'report-student' | 'report-personal'
+  | 'report-student' | 'report-staff' | 'report-personal'
   | 'profile-view' | 'profile-security'
   | 'req-leave' | 'req-training'
   | 'staff-list' | 'staff-add';
@@ -85,6 +113,351 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   const [attendanceMode, setAttendanceMode] = useState<'mark' | 'report'>('mark');
   const [showReport, setShowReport] = useState(false);
   const [reportSubTab, setReportSubTab] = useState<'class-daily' | 'class-historical' | 'staff-logs' | 'personal'>('class-daily');
+
+  // CSV student bulk import States
+  const [csvFile, setCsvFile] = useState<File | null>(null);
+  const [csvHeaders, setCsvHeaders] = useState<string[]>([]);
+  const [csvRows, setCsvRows] = useState<any[][]>([]);
+  const [columnMapping, setColumnMapping] = useState<Record<string, string>>({});
+  const [isParsingCsv, setIsParsingCsv] = useState(false);
+  const [isDraggingCsv, setIsDraggingCsv] = useState(false);
+  const [autoCreateEntities, setAutoCreateEntities] = useState(true);
+  const [defaultEnrollmentType, setDefaultEnrollmentType] = useState<'Public' | 'Private' | 'Dropout' | 'Fresh' | 'Other'>('Fresh');
+  const [csvImportProgress, setCsvImportProgress] = useState<{ total: number; current: number; status: string } | null>(null);
+  const [csvImportResult, setCsvImportResult] = useState<{ success: number; failed: number; errors: { row: number; reason: string }[] } | null>(null);
+
+  const handleCsvFileSelect = (file: File) => {
+    if (!file) return;
+    setCsvFile(file);
+    setIsParsingCsv(true);
+    setCsvImportResult(null);
+    setCsvImportProgress(null);
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = new Uint8Array(e.target?.result as ArrayBuffer);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const firstSheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[firstSheetName];
+        
+        // Convert to sheet in header-1 array-of-arrays style to let users map columns
+        const rows = XLSX.utils.sheet_to_json<any[]>(worksheet, { header: 1, defval: '' });
+        
+        if (rows.length === 0) {
+          alert('The chosen CSV file appears to be empty.');
+          setIsParsingCsv(false);
+          return;
+        }
+
+        // Filter out completely empty rows
+        const nonEmptyRows = rows.filter(row => row && row.some(val => val !== undefined && val !== null && String(val).trim() !== ''));
+
+        if (nonEmptyRows.length === 0) {
+          alert('No valid content rows found in the CSV.');
+          setIsParsingCsv(false);
+          return;
+        }
+
+        const headers = nonEmptyRows[0].map(h => String(h).trim());
+        const dataRows = nonEmptyRows.slice(1);
+
+        setCsvHeaders(headers);
+        setCsvRows(dataRows);
+
+        // Pre-map columns using our target fields & synonyms
+        const initialMapping: Record<string, string> = {};
+        const availableTargetFields = [
+          { key: 'name', synonyms: ['name', 'student name', 'student_name', 'full name'] },
+          { key: 'admission_no', synonyms: ['admission #', 'admission_no', 'admission no', 'student id', 'student_id', 'id'] },
+          { key: 'father_name', synonyms: ['father name', 'father_name', 'guardian name', 'guardian_name'] },
+          { key: 'father_cnic', synonyms: ['father cnic', 'father_cnic', 'guardian cnic', 'guardian_cnic', 'cnic', 'form-b', 'form b', 'form_b'] },
+          { key: 'father_mobile_no', synonyms: ['father mobile no', 'father_mobile', 'father mobile', 'mobile no', 'phone no', 'emergency no', 'student mobile no', 'emerency no', 'student_mobile_no', 'emergency_no'] },
+          { key: 'gender', synonyms: ['gender', 'student gender', 'sex'] },
+          { key: 'date_of_birth', synonyms: ['date of birth', 'dob', 'birth date', 'date_of_birth'] },
+          { key: 'class_name', synonyms: ['class name', 'class', 'grade', 'level', 'class_name'] },
+          { key: 'section_name', synonyms: ['class section', 'section', 'group', 'section_name'] },
+          { key: 'session', synonyms: ['session year', 'session', 'academic year', 'year', 'session_year'] },
+          { key: 'student_status', synonyms: ['student status', 'status', 'student_status'] },
+          { key: 'class_status', synonyms: ['class status', 'class_status'] },
+          { key: 'previous_school_name', synonyms: ['school name', 'previous school', 'previous school name', 'school_name', 'previous_school_name'] },
+          { key: 'previous_school_emis', synonyms: ['emis code', 'school emis', 'school_emis', 'emis_code', 'previous_school_emis', 'emis'] },
+          { key: 'class_enrolment_date', synonyms: ['class enrolment date', 'enrolment date', 'admission date', 'class_enrolment_date', 'admission_date'] }
+        ];
+
+        availableTargetFields.forEach(field => {
+          // Find matching header by synonym
+          const index = headers.findIndex(h => {
+            const hLower = h.toLowerCase().replace(/[\s\-_]/g, '');
+            return field.synonyms.some(syn => {
+              const synLower = syn.toLowerCase().replace(/[\s\-_]/g, '');
+              return hLower.includes(synLower) || synLower.includes(hLower);
+            });
+          });
+          if (index !== -1) {
+            initialMapping[field.key] = headers[index];
+          } else {
+            // Check exact or partial matches
+            const partialIndex = headers.findIndex(h => {
+              const hLower = h.toLowerCase();
+              return hLower.includes(field.key.toLowerCase());
+            });
+            if (partialIndex !== -1) {
+              initialMapping[field.key] = headers[partialIndex];
+            }
+          }
+        });
+
+        if (!initialMapping['admission_no']) {
+          const defaultNoIdx = headers.findIndex(h => h.toLowerCase().includes('id') || h.toLowerCase().includes('no') || h.toLowerCase().includes('#'));
+          if (defaultNoIdx !== -1) initialMapping['admission_no'] = headers[defaultNoIdx];
+        }
+
+        setColumnMapping(initialMapping);
+      } catch (err: any) {
+        console.error('Error parsing CSV file:', err);
+        alert(`Failed to parse CSV: ${err.message || err}`);
+      } finally {
+        setIsParsingCsv(false);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const handleExecuteImport = async () => {
+    if (csvRows.length === 0) return;
+    
+    // Build index mappings
+    const headerMapIdx: Record<string, number> = {};
+    Object.entries(columnMapping).forEach(([targetKey, headerName]) => {
+      const idx = csvHeaders.indexOf(headerName);
+      if (idx !== -1) {
+        headerMapIdx[targetKey] = idx;
+      }
+    });
+
+    setCsvImportProgress({ total: csvRows.length, current: 0, status: 'Initializing import flow...' });
+    setCsvImportResult(null);
+
+    let successCount = 0;
+    let failedCount = 0;
+    const errorsList: { row: number; reason: string }[] = [];
+    const completedStudents: Student[] = [];
+
+    let currentClasses = [...allClasses];
+    let currentSections = [...sections];
+
+    for (let i = 0; i < csvRows.length; i++) {
+      const row = csvRows[i];
+      const rowNum = i + 2; // Row number in Excel/CSV (1-based sheet + 1 for header)
+      
+      setCsvImportProgress({
+        total: csvRows.length,
+        current: i,
+        status: `Processing Row ${rowNum} of ${csvRows.length + 1}...`
+      });
+
+      try {
+        const getVal = (key: string) => {
+          const idx = headerMapIdx[key];
+          if (idx === undefined) return '';
+          return row[idx] !== undefined && row[idx] !== null ? String(row[idx]).trim() : '';
+        };
+
+        const studentName = getVal('name');
+        if (!studentName) {
+          throw new Error('Student name is required but found empty on this row.');
+        }
+
+        // Get or Create Class
+        const csvClassName = getVal('class_name');
+        let clsId: number | null = null;
+        if (csvClassName) {
+          let cls = currentClasses.find(c => c.class_name && c.class_name.toLowerCase().trim() === csvClassName.toLowerCase().trim());
+          if (!cls) {
+            cls = currentClasses.find(c => c.class_name && c.class_name.toLowerCase().trim().includes(csvClassName.toLowerCase().trim()));
+          }
+
+          if (!cls && autoCreateEntities) {
+            setCsvImportProgress(prev => ({
+              ...prev!,
+              status: `Auto-creating Class "${csvClassName}"...`
+            }));
+
+            if (import.meta.env.VITE_SUPABASE_URL) {
+              const { data: newCls, error: cErr } = await supabase
+                .from('classes')
+                .insert([{
+                  class_name: csvClassName,
+                  academic_year: getVal('session') || new Date().getFullYear().toString(),
+                  emis: user.emis
+                }])
+                .select();
+              
+              if (cErr) throw new Error(`Failed to create class "${csvClassName}": ${cErr.message}`);
+              if (newCls && newCls.length > 0) {
+                cls = newCls[0];
+                currentClasses.push(cls);
+                setAllClasses(prev => [...prev, newCls[0]]);
+              }
+            } else {
+              const mockC = {
+                id: Math.floor(Math.random() * 2147483647),
+                class_name: csvClassName,
+                academic_year: getVal('session') || new Date().getFullYear().toString(),
+                emis: user.emis
+              } as Class;
+              cls = mockC;
+              currentClasses.push(mockC);
+              setAllClasses(prev => [...prev, mockC]);
+            }
+          }
+          if (cls) clsId = cls.id;
+        }
+
+        // Get or Create Section
+        const csvSecName = getVal('section_name');
+        let secId: number | null = null;
+        if (csvSecName) {
+          let sect = currentSections.find(s => s.section_name && s.section_name.toLowerCase().trim() === csvSecName.toLowerCase().trim());
+          if (!sect && autoCreateEntities) {
+            setCsvImportProgress(prev => ({
+              ...prev!,
+              status: `Auto-creating Section "${csvSecName}"...`
+            }));
+
+            if (import.meta.env.VITE_SUPABASE_URL) {
+              const { data: newSec, error: sErr } = await supabase
+                .from('sections')
+                .insert([{
+                  section_name: csvSecName,
+                  emis: user.emis
+                }])
+                .select();
+
+              if (sErr) throw new Error(`Failed to create section "${csvSecName}": ${sErr.message}`);
+              if (newSec && newSec.length > 0) {
+                sect = newSec[0];
+                currentSections.push(sect);
+                setSections(prev => [...prev, newSec[0]]);
+              }
+            } else {
+              const mockS = {
+                id: Math.floor(Math.random() * 2147483647),
+                section_name: csvSecName,
+                emis: user.emis
+              } as Section;
+              sect = mockS;
+              currentSections.push(mockS);
+              setSections(prev => [...prev, mockS]);
+            }
+          }
+          if (sect) secId = sect.id;
+        }
+
+        let dobVal = getVal('date_of_birth') || null;
+        if (dobVal && !isNaN(Number(dobVal)) && Number(dobVal) > 10000) {
+          const date = new Date((Number(dobVal) - 25569) * 86400 * 1000);
+          dobVal = date.toISOString().split('T')[0];
+        } else if (dobVal) {
+          try {
+            const parsedD = new Date(dobVal);
+            if (!isNaN(parsedD.getTime())) {
+              dobVal = parsedD.toISOString().split('T')[0];
+            }
+          } catch (_) {
+            // keep unmodified raw DOB
+          }
+        }
+
+        const rawGender = getVal('gender') || 'MALE';
+        const cleanedGender = ['female', 'f'].includes(rawGender.toLowerCase()) ? 'FEMALE' : 'MALE';
+
+        let enrolmentDateVal = getVal('class_enrolment_date') || null;
+        if (enrolmentDateVal && !isNaN(Number(enrolmentDateVal)) && Number(enrolmentDateVal) > 10000) {
+          const date = new Date((Number(enrolmentDateVal) - 25569) * 86400 * 1000);
+          enrolmentDateVal = date.toISOString().split('T')[0];
+        } else if (enrolmentDateVal) {
+          try {
+            const parsedE = new Date(enrolmentDateVal);
+            if (!isNaN(parsedE.getTime())) {
+              enrolmentDateVal = parsedE.toISOString().split('T')[0];
+            }
+          } catch (_) {
+            // keep unmodified
+          }
+        }
+        if (!enrolmentDateVal) {
+          enrolmentDateVal = new Date().toISOString().split('T')[0];
+        }
+
+        const studentData = {
+          name: studentName,
+          admission_no: getVal('admission_no') || `ADM-${new Date().getFullYear()}-${Math.floor(Math.random() * 100000)}`,
+          class_id: clsId,
+          section_id: secId,
+          enrollment_type: defaultEnrollmentType,
+          session: getVal('session') || new Date().getFullYear().toString(),
+          gender: cleanedGender,
+          date_of_birth: dobVal,
+          father_name: getVal('father_name') || null,
+          father_cnic: getVal('father_cnic') || null,
+          father_mobile_no: getVal('father_mobile_no') || null,
+          class_enrolment_date: enrolmentDateVal,
+          class_status: getVal('class_status') || 'Active',
+          student_status: getVal('student_status') || 'Active',
+          previous_school_name: getVal('previous_school_name') || null,
+          previous_school_emis: getVal('previous_school_emis') || null,
+          emis: user.emis
+        };
+
+        if (import.meta.env.VITE_SUPABASE_URL) {
+          const { data: insertedStudent, error: insertErr } = await supabase
+            .from('students')
+            .insert([studentData])
+            .select();
+
+          if (insertErr) throw insertErr;
+          if (insertedStudent && insertedStudent.length > 0) {
+            completedStudents.push(insertedStudent[0]);
+          }
+        } else {
+          const mockStudObj = {
+            ...studentData,
+            id: Math.floor(Math.random() * 2147483647)
+          } as Student;
+          completedStudents.push(mockStudObj);
+        }
+
+        successCount++;
+      } catch (err: any) {
+        console.error(`Import failed on row ${rowNum}:`, err);
+        failedCount++;
+        errorsList.push({
+          row: rowNum,
+          reason: err.message || JSON.stringify(err)
+        });
+      }
+    }
+
+    setCsvImportProgress(null);
+    setCsvImportResult({
+      success: successCount,
+      failed: failedCount,
+      errors: errorsList
+    });
+
+    if (completedStudents.length > 0) {
+      setEnrolmentLogs(prev => [...completedStudents, ...prev]);
+    }
+
+    if (failedCount === 0) {
+      setCsvFile(null);
+      setCsvHeaders([]);
+      setCsvRows([]);
+      setColumnMapping({});
+    }
+  };
   
   // States for general class-wise reports
   const [selectedReportClassId, setSelectedReportClassId] = useState<number | null>(null);
@@ -262,14 +635,22 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   });
 
   const sortedStudents = useMemo(() => {
-    if (!sortDirection) return classStudents;
-    return [...classStudents].sort((a, b) => {
+    let filtered = classStudents;
+    if (studentSearchQuery) {
+      const q = studentSearchQuery.toLowerCase();
+      filtered = classStudents.filter(s => 
+        (s.name || '').toLowerCase().includes(q) || 
+        (s.admission_no || '').toLowerCase().includes(q)
+      );
+    }
+    if (!sortDirection) return filtered;
+    return [...filtered].sort((a, b) => {
       const numA = parseInt(a.admission_no || '0');
       const numB = parseInt(b.admission_no || '0');
       if (sortDirection === 'asc') return numA - numB;
       return numB - numA;
     });
-  }, [classStudents, sortDirection]);
+  }, [classStudents, sortDirection, studentSearchQuery]);
 
   const sortedExamResults = useMemo(() => {
     if (!sortDirection) return examResults;
@@ -1675,6 +2056,29 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   const [marksEntryData, setMarksEntryData] = useState<Record<number, number>>({});
   const [isSavingMarks, setIsSavingMarks] = useState(false);
 
+  useEffect(() => {
+    if (selectedSessionId && selectedSemesterId && selectedClassSubjectId && examResults.length > 0) {
+      const classSub = classSubjects.find(cs => cs.id === parseInt(selectedClassSubjectId));
+      if (!classSub) return;
+      
+      const newMarksData: Record<number, number> = {};
+      sortedStudents.forEach(student => {
+        const existing = examResults.find(r => 
+          r.student_id === student.id && 
+          r.session_id === parseInt(selectedSessionId) && 
+          r.semester_id === parseInt(selectedSemesterId) &&
+          r.subject_id === classSub.subject_id
+        );
+        if (existing) {
+          newMarksData[student.id!] = existing.obtained_marks;
+        }
+      });
+      setMarksEntryData(newMarksData);
+    } else {
+      setMarksEntryData({});
+    }
+  }, [selectedSessionId, selectedSemesterId, selectedClassSubjectId, examResults, sortedStudents, classSubjects]);
+
   const saveMarks = async (e: FormEvent) => {
     e.preventDefault();
     if (!selectedSessionId || !selectedSemesterId || !selectedClassSubjectId) {
@@ -1683,6 +2087,13 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
     }
     const classSub = classSubjects.find(cs => cs.id === parseInt(selectedClassSubjectId));
     if (!classSub) return;
+
+    // Validation: check if any mark exceeds total_marks
+    const invalidEntries = Object.entries(marksEntryData).filter(([_, marks]) => (marks as number) > classSub.total_marks);
+    if (invalidEntries.length > 0) {
+      alert(`Validation Error: One or more entries exceed the maximum marks allowed (${classSub.total_marks}).`);
+      return;
+    }
 
     setIsSavingMarks(true);
     try {
@@ -1699,6 +2110,12 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
         emis: user.emis,
         grade: (marks as number) >= (classSub.total_marks * 0.9) ? 'A+' : (marks as number) >= (classSub.total_marks * 0.8) ? 'A' : (marks as number) >= (classSub.total_marks * 0.7) ? 'B' : (marks as number) >= (classSub.total_marks * 0.6) ? 'C' : (marks as number) >= classSub.passing_marks ? 'D' : 'F'
       }));
+
+      if (resultsToSave.length === 0) {
+        alert('No modifications to archive');
+        setIsSavingMarks(false);
+        return;
+      }
 
       if (isSupabaseConfigured) {
         const { error } = await supabase.from('exam_results').upsert(resultsToSave, { onConflict: 'student_id,class_id,subject_id,session_id,semester_id' });
@@ -1751,6 +2168,129 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
     }
   };
 
+  const downloadAwardList = () => {
+    if (!selectedSessionId || !selectedSemesterId || !selectedClassSubjectId) {
+      alert('Please select Session, Semester and Subject first');
+      return;
+    }
+
+    const session = sessions.find(s => s.id === parseInt(selectedSessionId));
+    const semester = semesters.find(s => s.id === parseInt(selectedSemesterId));
+    const cs = classSubjects.find(x => x.id === parseInt(selectedClassSubjectId));
+    const subj = subjects.find(s => s.id === cs?.subject_id);
+    const cls = allClasses.find(c => c.id === cs?.class_id);
+
+    const exportData = sortedStudents.map(student => {
+      const res = examResults.find(r => 
+          r.student_id === student.id && 
+          r.session_id === parseInt(selectedSessionId) && 
+          r.semester_id === parseInt(selectedSemesterId) &&
+          r.subject_id === cs?.subject_id
+      );
+      const percent = res ? (res.obtained_marks / res.total_marks) * 100 : 0;
+      return {
+        'Admission No': student.admission_no,
+        'Student Name': student.name,
+        'Father Name': student.father_name || '-',
+        'Max Marks': cs?.total_marks || 0,
+        'Passing Marks': cs?.passing_marks || 0,
+        'Obtained Marks': res?.obtained_marks || 0,
+        'Grade': res?.grade || '-',
+        'Performance %': res ? `${Math.round(percent)}%` : '-',
+        'Status': res ? (res.obtained_marks >= res.passing_marks ? 'PASS' : 'FAIL') : 'PENDING'
+      };
+    });
+
+    const header = [
+      [schoolName || 'School Information System'],
+      [`Examination: ${semester?.name} - ${session?.name}`],
+      [`Class: ${cls?.class_name || '-'} | Subject: ${subj?.name || '-'}`],
+      [`Award List Generated on: ${new Date().toLocaleDateString()}`],
+      []
+    ];
+    
+    const finalWorksheet = XLSX.utils.aoa_to_sheet(header);
+    XLSX.utils.sheet_add_json(finalWorksheet, exportData, { origin: "A6" });
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, finalWorksheet, "Award List");
+    XLSX.writeFile(workbook, `AwardList_${cls?.class_name}_${subj?.name}.xlsx`);
+  };
+
+  const downloadAwardListPDF = () => {
+    if (!selectedSessionId || !selectedSemesterId || !selectedClassSubjectId) {
+       alert('Please select Session, Semester and Subject first');
+       return;
+    }
+
+    const session = sessions.find(s => s.id === parseInt(selectedSessionId));
+    const semester = semesters.find(s => s.id === parseInt(selectedSemesterId));
+    const cs = classSubjects.find(x => x.id === parseInt(selectedClassSubjectId));
+    const subj = subjects.find(s => s.id === cs?.subject_id);
+    const cls = allClasses.find(c => c.id === cs?.class_id);
+
+    const doc = new jsPDF() as any;
+    
+    // Header
+    doc.setFontSize(22);
+    doc.setTextColor(16, 185, 129);
+    doc.text(schoolName || 'School Information System', 105, 20, { align: 'center' });
+    
+    doc.setFontSize(14);
+    doc.setTextColor(100);
+    doc.text(`Official Academic Award List`, 105, 30, { align: 'center' });
+    
+    doc.setFontSize(10);
+    doc.text(`Examination: ${semester?.name} - ${session?.name}`, 14, 45);
+    doc.text(`Class: ${cls?.class_name || '-'}`, 14, 52);
+    doc.text(`Subject: ${subj?.name || '-'}`, 14, 59);
+    doc.text(`Generated: ${new Date().toLocaleString()}`, 196, 59, { align: 'right' });
+
+    const tableData = sortedStudents.map(student => {
+      const res = examResults.find(r => 
+          r.student_id === student.id && 
+          r.session_id === parseInt(selectedSessionId) && 
+          r.semester_id === parseInt(selectedSemesterId) &&
+          r.subject_id === cs?.subject_id
+      );
+      const percent = res ? (res.obtained_marks / res.total_marks) * 100 : 0;
+      return [
+        student.admission_no,
+        `${student.name}\nS/O: ${student.father_name || '-'}`,
+        cs?.total_marks || 0,
+        res?.obtained_marks || '00',
+        res?.grade || '-',
+        res ? `${Math.round(percent)}%` : '-',
+        res ? (res.obtained_marks >= res.passing_marks ? 'QUALIFIED' : 'FAILED') : 'PENDING'
+      ];
+    });
+
+    autoTable(doc, {
+      startY: 65,
+      head: [['ADM NO', 'STUDENT IDENTITY', 'MAX', 'SCORE', 'GRADE', '%', 'JUDGEMENT']],
+      body: tableData,
+      theme: 'grid',
+      headStyles: { fillColor: [16, 185, 129], textColor: 255, fontSize: 8, fontStyle: 'bold' },
+      bodyStyles: { fontSize: 8 },
+      columnStyles: {
+        0: { cellWidth: 25 },
+        2: { halign: 'center' },
+        3: { halign: 'center' },
+        4: { halign: 'center' },
+        5: { halign: 'center' }
+      },
+      didParseCell: (data: any) => {
+        if (data.section === 'body' && data.column.index === 5) {
+          if (data.cell.raw === 'QUALIFIED') data.cell.styles.textColor = [16, 185, 129];
+          if (data.cell.raw === 'FAILED') data.cell.styles.textColor = [239, 68, 68];
+        }
+      }
+    });
+
+    doc.save(`AwardList_${cls?.class_name}_${subj?.name}.pdf`);
+  };
+
+
   const tabs = [
     { id: 'home', label: 'Dashboard', icon: Shield },
     { 
@@ -1786,6 +2326,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       icon: BarChart3,
       subTabs: [
         { id: 'report-student', label: 'Student att rep', icon: FileText },
+        { id: 'report-staff', label: 'Staff attendance report', icon: Users },
         { id: 'report-personal', label: 'My attendance report', icon: History },
       ]
     },
@@ -2619,65 +3160,238 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                          })}
                       </select>
                    </div>
-                </div>
+                 </div>
 
-                {selectedClassSubjectId && (
+                 {selectedClassSubjectId && (
                   <form onSubmit={saveMarks} className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
-                     <div className="flex items-center gap-4 p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl shadow-inner">
-                        <div className="w-1 h-12 bg-emerald-500 rounded-full" />
-                        <div>
-                           <p className="text-[9px] text-emerald-500 font-bold uppercase tracking-widest">Entry Parameter Active</p>
-                           <p className="text-xs text-white uppercase font-bold tracking-tight">Total Assessable Marks: {classSubjects.find(cs => cs.id === parseInt(selectedClassSubjectId))?.total_marks}</p>
+                     <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                        <div className="p-5 bg-emerald-500/5 border border-emerald-500/10 rounded-3xl">
+                           <p className="text-[8px] text-emerald-500 font-bold uppercase tracking-widest mb-1">Scale Limit</p>
+                           <p className="text-2xl text-slate-900 dark:text-white font-black">{classSubjects.find(cs => cs.id === parseInt(selectedClassSubjectId))?.total_marks}</p>
+                        </div>
+                        <div className="p-5 bg-blue-500/5 border border-blue-500/10 rounded-3xl">
+                           <p className="text-[8px] text-blue-500 font-bold uppercase tracking-widest mb-1">Cohort Size</p>
+                           <p className="text-2xl text-slate-900 dark:text-white font-black">{sortedStudents.length}</p>
+                        </div>
+                        <div className="p-5 bg-amber-500/5 border border-amber-500/10 rounded-3xl">
+                           <p className="text-[8px] text-amber-500 font-bold uppercase tracking-widest mb-1">Qualify Rate</p>
+                           <p className="text-2xl text-slate-900 dark:text-white font-black">
+                              {(() => {
+                                 const cs = classSubjects.find(x => x.id === parseInt(selectedClassSubjectId));
+                                 const passed = sortedStudents.filter(s => (marksEntryData[s.id!] || 0) >= (cs?.passing_marks || 0)).length;
+                                 return sortedStudents.length > 0 ? `${Math.round((passed / sortedStudents.length) * 100)}%` : '0%';
+                              })()}
+                           </p>
+                        </div>
+                        <div className="p-5 bg-purple-500/5 border border-purple-500/10 rounded-3xl">
+                           <p className="text-[8px] text-purple-500 font-bold uppercase tracking-widest mb-1">Group Average</p>
+                           <p className="text-2xl text-slate-900 dark:text-white font-black">
+                              {sortedStudents.length > 0 ? (sortedStudents.reduce((a, c) => a + (marksEntryData[c.id!] || 0), 0) / sortedStudents.length).toFixed(1) : '0.0'}
+                           </p>
                         </div>
                      </div>
 
-                     <div className="bg-slate-950/30 rounded-3xl border border-slate-800 overflow-hidden shadow-inner">
-                        <table className="w-full text-left">
-                           <thead>
-                              <tr className="bg-slate-900/50 border-b border-slate-800">
-                                 <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Candidate Identity</th>
-                                 <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center cursor-pointer hover:text-emerald-500 transition-colors" onClick={toggleSort}>
-                                   <div className="flex items-center justify-center gap-2">
-                                     {sortDirection === 'asc' ? <ArrowUp className="w-3 h-3" /> : sortDirection === 'desc' ? <ArrowDown className="w-3 h-3" /> : <ArrowUpDown className="w-3 h-3" />}
-                                     Admission No
-                                   </div>
-                                 </th>
-                                 <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Obtained Metrics</th>
-                              </tr>
-                           </thead>
-                           <tbody className="divide-y divide-slate-800">
-                              {sortedStudents.map((student, idx) => (
-                                <tr key={`marks-row-${student.id || idx}`} className="hover:bg-emerald-500/5 transition-colors group">
-                                   <td className="px-6 py-4">
-                                      <p className="text-xs font-bold text-white uppercase tracking-tight group-hover:text-emerald-500 transition-colors">{student.name}</p>
-                                   </td>
-                                   <td className="px-6 py-4 text-center font-mono text-[10px] text-slate-500">{student.admission_no}</td>
-                                   <td className="px-6 py-4 text-right">
-                                      <input 
-                                        type="number"
-                                        min="0"
-                                        max={classSubjects.find(cs => cs.id === parseInt(selectedClassSubjectId))?.total_marks}
-                                        value={marksEntryData[student.id!] || ''}
-                                        onChange={(e) => setMarksEntryData({...marksEntryData, [student.id!]: parseInt(e.target.value)})}
-                                        required
-                                        className="w-24 bg-slate-900 border border-slate-800 rounded-xl px-4 py-3 text-center text-sm font-bold text-emerald-500 focus:border-emerald-500 outline-none transition-all shadow-lg"
-                                      />
-                                   </td>
-                                </tr>
-                              ))}
-                           </tbody>
-                        </table>
+                     <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        <div className="relative group flex-1">
+                           <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 group-focus-within:text-emerald-500 transition-colors" />
+                           <input 
+                             type="text"
+                             placeholder="Search in results..."
+                             className="w-full bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-2xl pl-12 pr-4 py-4 text-[11px] text-slate-950 dark:text-white uppercase tracking-widest focus:border-emerald-500 outline-none transition-all shadow-sm"
+                             value={studentSearchQuery}
+                             onChange={(e) => setStudentSearchQuery(e.target.value)}
+                           />
+                        </div>
+                        <div className="flex items-center gap-3 w-full md:w-auto">
+                           <button type="button" onClick={() => {
+                              const cs = classSubjects.find(x => x.id === parseInt(selectedClassSubjectId));
+                              if(cs) {
+                                  const next = {...marksEntryData};
+                                  sortedStudents.forEach(s => { if(typeof next[s.id!] === 'undefined') next[s.id!] = 0; });
+                                  setMarksEntryData(next);
+                              }
+                           }} className="flex-1 md:flex-none px-6 py-4 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 rounded-2xl text-[10px] font-bold uppercase tracking-widest hover:text-emerald-500 transition-all border border-transparent hover:border-emerald-500/20">Fill Zeros</button>
+                           <button type="button" onClick={() => setMarksEntryData({})} className="flex-1 md:flex-none px-6 py-4 bg-rose-500/5 text-rose-500 rounded-2xl text-[10px] font-bold uppercase tracking-widest hover:bg-rose-500 hover:text-white transition-all border border-rose-500/10">Purge</button>
+                        </div>
+                     </div>
+
+                     <div className="space-y-4">
+                        {/* Desktop View Table */}
+                        <div className="hidden lg:block bg-white dark:bg-[#020617]/50 rounded-[2.5rem] border border-slate-200 dark:border-slate-800 overflow-hidden shadow-2xl">
+                           <table className="w-full text-left">
+                              <thead>
+                                 <tr className="bg-slate-50 dark:bg-slate-900/50 border-b border-slate-200 dark:border-slate-800">
+                                    <th className="px-8 py-6 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Student Profile</th>
+                                    <th className="px-8 py-6 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center cursor-pointer hover:text-emerald-500 transition-colors" onClick={toggleSort}>
+                                      <div className="flex items-center justify-center gap-1.5">
+                                         {sortDirection === 'asc' ? <ArrowUp className="w-3 h-3" /> : sortDirection === 'desc' ? <ArrowDown className="w-3 h-3" /> : <ArrowUpDown className="w-3 h-3" />}
+                                         Admission
+                                      </div>
+                                    </th>
+                                    <th className="px-8 py-6 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Status</th>
+                                    <th className="px-8 py-6 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Metric Entry</th>
+                                 </tr>
+                              </thead>
+                              <tbody className="divide-y divide-slate-100 dark:divide-slate-800/50">
+                                 {sortedStudents.map((student, idx) => {
+                                    const cs = classSubjects.find(x => x.id === parseInt(selectedClassSubjectId));
+                                    const val = marksEntryData[student.id!] ?? null;
+                                    const isP = cs && val !== null ? val >= cs.passing_marks : false;
+                                    const isE = cs && val !== null ? val > cs.total_marks : false;
+                                    const hasV = val !== null;
+
+                                    return (
+                                      <tr key={`marks-row-desktop-${student.id || idx}`} className="hover:bg-emerald-500/5 transition-colors group">
+                                         <td className="px-8 py-6">
+                                            <div className="flex items-center gap-4">
+                                               <div className={`w-10 h-10 rounded-2xl flex items-center justify-center text-[12px] font-bold border transition-all ${hasV ? (isP ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-500' : 'bg-rose-500/10 border-rose-500/20 text-rose-500') : 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-400'}`}>
+                                                  {(student.name || 'S').charAt(0).toUpperCase()}
+                                               </div>
+                                               <div>
+                                                  <p className="text-[12px] font-bold text-slate-900 dark:text-white uppercase tracking-tight group-hover:text-emerald-500 transition-colors">{student.name}</p>
+                                                  <p className="text-[9px] text-slate-500 uppercase tracking-widest mt-0.5">{student.gender || 'Associate'}</p>
+                                               </div>
+                                            </div>
+                                         </td>
+                                         <td className="px-8 py-6 text-center font-mono text-[10px] text-slate-400">{student.admission_no}</td>
+                                         <td className="px-8 py-6 text-center">
+                                            <div className={`inline-flex px-3 py-1.5 rounded-full text-[9px] font-bold uppercase tracking-widest border transition-all ${
+                                               !hasV ? 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500' :
+                                               isE ? 'bg-rose-500/20 border-rose-500/40 text-rose-500 animate-pulse' :
+                                               isP ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-500' : 
+                                               'bg-rose-500/10 border-rose-500/20 text-rose-500'
+                                            }`}>
+                                               {!hasV ? 'Pending' : isE ? 'Limit Error' : isP ? 'Qualified' : 'Requires Review'}
+                                            </div>
+                                         </td>
+                                         <td className="px-8 py-6 text-right">
+                                            <input 
+                                              type="number"
+                                              min="0"
+                                              max={cs?.total_marks}
+                                              value={val ?? ''}
+                                              onChange={(e) => {
+                                                 const v = e.target.value === '' ? null : parseInt(e.target.value);
+                                                 setMarksEntryData(p => {
+                                                    const n = {...p};
+                                                    if(v === null) delete n[student.id!];
+                                                    else n[student.id!] = v;
+                                                    return n;
+                                                 });
+                                              }}
+                                              onKeyDown={(e) => {
+                                                 if (e.key === 'Enter') {
+                                                    e.preventDefault();
+                                                    const allInputs = Array.from(document.querySelectorAll('input[type="number"]'));
+                                                    const visibleInputs = allInputs.filter(el => {
+                                                       const style = window.getComputedStyle(el);
+                                                       return style.display !== 'none' && style.visibility !== 'hidden' && (el as HTMLElement).offsetParent !== null;
+                                                    });
+                                                    const index = visibleInputs.indexOf(e.currentTarget as HTMLInputElement);
+                                                    if (index < visibleInputs.length - 1) (visibleInputs[index+1] as HTMLInputElement).focus();
+                                                 }
+                                              }}
+                                              className={`w-32 bg-slate-50 dark:bg-[#020617] border rounded-2xl px-5 py-4 text-center text-[13px] font-bold transition-all shadow-inner outline-none
+                                                ${isE ? 'border-rose-500 text-rose-500' : 
+                                                  hasV ? (isP ? 'border-emerald-500/50 text-emerald-500 focus:border-emerald-500' : 'border-rose-500/50 text-rose-500 focus:border-rose-500') : 
+                                                  'border-slate-200 dark:border-slate-800 text-slate-400 focus:border-emerald-500'}
+                                              `}
+                                            />
+                                         </td>
+                                      </tr>
+                                    );
+                                 })}
+                              </tbody>
+                           </table>
+                        </div>
+
+                        {/* Mobile & Tablet Card View */}
+                        <div className="lg:hidden grid grid-cols-1 md:grid-cols-2 gap-4">
+                           {sortedStudents.map((student, idx) => {
+                              const cs = classSubjects.find(x => x.id === parseInt(selectedClassSubjectId));
+                              const val = marksEntryData[student.id!] ?? null;
+                              const isP = cs && val !== null ? val >= cs.passing_marks : false;
+                              const isE = cs && val !== null ? val > cs.total_marks : false;
+                              const hasV = val !== null;
+
+                              return (
+                                 <div key={`marks-card-mobile-${student.id || idx}`} className="bg-white dark:bg-[#020617]/50 border border-slate-200 dark:border-slate-800 p-6 rounded-[2.5rem] space-y-5 shadow-lg group">
+                                    <div className="flex items-center justify-between">
+                                       <div className="flex items-center gap-4">
+                                          <div className={`w-12 h-12 rounded-2xl flex items-center justify-center text-[14px] font-bold border transition-all ${hasV ? (isP ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-500' : 'bg-rose-500/10 border-rose-500/20 text-rose-500') : 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-400'}`}>
+                                             {(student.name || 'S').charAt(0).toUpperCase()}
+                                          </div>
+                                          <div>
+                                             <p className="text-[13px] font-bold text-slate-900 dark:text-white uppercase tracking-tight group-hover:text-emerald-500 transition-colors">{student.name}</p>
+                                             <p className="text-[9px] text-slate-500 uppercase tracking-widest font-mono">ID: {student.admission_no}</p>
+                                          </div>
+                                       </div>
+                                       <div className={`px-3 py-1.5 rounded-full text-[8px] font-bold uppercase tracking-widest border transition-all ${
+                                          !hasV ? 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500' :
+                                          isE ? 'bg-rose-500/20 border-rose-500/40 text-rose-500' :
+                                          isP ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-500' : 
+                                          'bg-rose-500/10 border-rose-500/20 text-rose-500'
+                                       }`}>
+                                          {!hasV ? 'Pending' : isE ? 'Limit Error' : isP ? 'Qualified' : 'Requires Review'}
+                                       </div>
+                                    </div>
+
+                                    <div className="pt-2">
+                                       <div className="flex flex-col space-y-2">
+                                          <div className="flex justify-between items-center mb-1">
+                                             <label className="text-[9px] text-slate-500 uppercase tracking-widest font-bold">Academic Performance Entry</label>
+                                             <span className="text-[10px] text-slate-400 font-mono">Max: {cs?.total_marks}</span>
+                                          </div>
+                                          <input 
+                                            type="number"
+                                            min="0"
+                                            max={cs?.total_marks}
+                                            placeholder="Enter scale..."
+                                            value={val ?? ''}
+                                            onChange={(e) => {
+                                               const v = e.target.value === '' ? null : parseInt(e.target.value);
+                                               setMarksEntryData(p => {
+                                                  const n = {...p};
+                                                  if(v === null) delete n[student.id!];
+                                                  else n[student.id!] = v;
+                                                  return n;
+                                               });
+                                            }}
+                                            onKeyDown={(e) => {
+                                               if (e.key === 'Enter') {
+                                                  e.preventDefault();
+                                                  const allInputs = Array.from(document.querySelectorAll('input[type="number"]'));
+                                                  const visibleInputs = allInputs.filter(el => {
+                                                     const style = window.getComputedStyle(el);
+                                                     return style.display !== 'none' && style.visibility !== 'hidden' && (el as HTMLElement).offsetParent !== null;
+                                                  });
+                                                  const index = visibleInputs.indexOf(e.currentTarget as HTMLInputElement);
+                                                  if (index < visibleInputs.length - 1) (visibleInputs[index+1] as HTMLInputElement).focus();
+                                               }
+                                            }}
+                                            className={`w-full bg-slate-50 dark:bg-[#020617] border rounded-2xl px-6 py-5 text-center text-lg font-black transition-all shadow-inner outline-none
+                                              ${isE ? 'border-rose-500 text-rose-500 bg-rose-500/5' : 
+                                                hasV ? (isP ? 'border-emerald-500/50 text-emerald-500 focus:border-emerald-500' : 'border-rose-500/50 text-rose-500 focus:border-rose-500') : 
+                                                'border-slate-200 dark:border-slate-800 text-slate-400 focus:border-emerald-500'}
+                                            `}
+                                          />
+                                       </div>
+                                    </div>
+                                 </div>
+                              );
+                           })}
+                        </div>
                      </div>
 
                      <button 
                        type="submit"
                        disabled={isSavingMarks}
-                       className="w-full py-5 bg-emerald-500 text-slate-950 rounded-2xl font-bold uppercase tracking-[0.2em] text-[11px] shadow-2xl shadow-emerald-500/20 hover:bg-emerald-400 active:scale-[0.99] transition-all disabled:opacity-50"
+                       className="w-full py-6 bg-emerald-500 text-slate-950 rounded-[2rem] font-bold uppercase tracking-[0.3em] text-[12px] shadow-2xl shadow-emerald-500/20 hover:bg-emerald-400 active:scale-[0.99] transition-all disabled:opacity-50"
                      >
-                       {isSavingMarks ? 'Transmitting Data...' : 'Finalize & Record Results'}
+                       {isSavingMarks ? 'Encapsulating Data...' : 'Commit & Synchronize Academic Records'}
                      </button>
                   </form>
-                )}
+               )}
              </div>
           </motion.div>
         )}
@@ -2800,39 +3514,81 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                    <h3 className="text-xl font-light uppercase tracking-[0.2em] text-slate-900 dark:text-white">Result Award List</h3>
                    <p className="text-[10px] text-emerald-500 uppercase tracking-widest font-bold mt-1">Verified Academic Performance Directory</p>
                 </div>
+                <div className="flex items-center gap-3">
+                   <button 
+                     onClick={downloadAwardList}
+                     disabled={!selectedClassSubjectId}
+                     className="flex items-center gap-2.5 px-6 py-3 bg-gradient-to-r from-teal-500 to-emerald-650 dark:from-teal-600 dark:to-emerald-755 text-white rounded-2xl text-[9px] font-black uppercase tracking-[0.21em] hover:brightness-110 active:scale-95 transition-all disabled:opacity-35 shadow-lg shadow-emerald-500/15 dark:shadow-emerald-500/5 cursor-pointer"
+                   >
+                     <FileText className="w-4 h-4 text-emerald-100 animate-pulse" /> Excel Sheet
+                   </button>
+                   <button 
+                     onClick={downloadAwardListPDF}
+                     disabled={!selectedClassSubjectId}
+                     className="flex items-center gap-2.5 px-6 py-3 bg-gradient-to-r from-purple-500 to-indigo-600 dark:from-purple-600 dark:to-indigo-755 text-white rounded-2xl text-[9px] font-black uppercase tracking-[0.21em] hover:brightness-110 active:scale-95 transition-all disabled:opacity-35 shadow-lg shadow-indigo-500/15 dark:shadow-indigo-500/10 cursor-pointer"
+                   >
+                     <Award className="w-4 h-4 text-purple-100 animate-pulse" /> PDF Report
+                   </button>
+                </div>
              </div>
 
              <div className="bg-card border border-border p-8 rounded-[2.5rem] shadow-xl relative overflow-hidden group">
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-6 relative z-10">
-                   <select 
-                     className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-4 text-[10px] text-slate-900 dark:text-white font-bold uppercase tracking-widest"
-                     onChange={(e) => setSelectedSessionId(e.target.value)}
-                   >
-                      <option value="">Select Session</option>
-                      {sessions.map(s => <option key={`award-sess-${s.id}`} value={s.id}>{s.name}</option>)}
-                   </select>
-                   <select 
-                     className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-4 text-[10px] text-slate-900 dark:text-white font-bold uppercase tracking-widest"
-                     onChange={(e) => setSelectedSemesterId(e.target.value)}
-                   >
-                      <option value="">Select Semester</option>
-                      {semesters.map(s => <option key={`award-sem-${s.id}`} value={s.id}>{s.name}</option>)}
-                   </select>
-                   <select 
-                     className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-4 text-[10px] text-slate-900 dark:text-white font-bold uppercase tracking-widest"
-                     value={selectedClassSubjectId || ''}
-                     onChange={(e) => handleSubjectChange(e.target.value)}
-                   >
-                      <option value="">Select Subject</option>
-                      {classSubjects.map(cs => {
-                        const cls = allClasses.find(c => c.id === cs.class_id);
-                        const subj = subjects.find(s => s.id === cs.subject_id);
-                        return <option key={`award-cs-${cs.id}`} value={cs.id}>{cls?.class_name} — {subj?.name}</option>
-                      })}
-                   </select>
-                   <button className="w-full bg-emerald-500 text-slate-950 font-bold uppercase tracking-[0.2em] text-[10px] rounded-xl hover:bg-emerald-400 active:scale-95 transition-all shadow-lg shadow-emerald-500/20">
-                      Query Records
-                   </button>
+                   <div className="space-y-1">
+                      <label className="text-[9px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Academic Session</label>
+                      <select 
+                        className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-4 text-[10px] text-slate-900 dark:text-white font-bold uppercase tracking-widest outline-none focus:border-emerald-500 transition-all"
+                        value={selectedSessionId || ''}
+                        onChange={(e) => setSelectedSessionId(e.target.value)}
+                      >
+                         <option value="">Select Session</option>
+                         {sessions.map(s => <option key={`award-sess-${s.id}`} value={s.id}>{s.name}</option>)}
+                      </select>
+                   </div>
+                   <div className="space-y-1">
+                      <label className="text-[9px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Semester Term</label>
+                      <select 
+                        className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-4 text-[10px] text-slate-900 dark:text-white font-bold uppercase tracking-widest outline-none focus:border-emerald-500 transition-all"
+                        value={selectedSemesterId || ''}
+                        onChange={(e) => setSelectedSemesterId(e.target.value)}
+                      >
+                         <option value="">Select Semester</option>
+                         {semesters.map(s => <option key={`award-sem-${s.id}`} value={s.id}>{s.name}</option>)}
+                      </select>
+                   </div>
+                   <div className="space-y-1">
+                      <label className="text-[9px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Target Class</label>
+                      <select 
+                        className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-4 text-[10px] text-slate-900 dark:text-white font-bold uppercase tracking-widest outline-none focus:border-emerald-500 transition-all"
+                        value={selectedClassId || ''}
+                        onChange={(e) => {
+                          const cid = e.target.value;
+                          setSelectedClassId(cid ? parseInt(cid) : null);
+                          if (cid) fetchStudents(parseInt(cid));
+                          setSelectedClassSubjectId('');
+                        }}
+                      >
+                         <option value="">Select Class</option>
+                         {allClasses.map(c => <option key={`award-cls-opt-${c.id}`} value={c.id}>{c.class_name}</option>)}
+                      </select>
+                   </div>
+                   <div className="space-y-1">
+                      <label className="text-[9px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Learning Subject</label>
+                      <select 
+                        className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-4 text-[10px] text-slate-900 dark:text-white font-bold uppercase tracking-widest outline-none focus:border-emerald-500 transition-all"
+                        value={selectedClassSubjectId || ''}
+                        onChange={(e) => handleSubjectChange(e.target.value)}
+                        disabled={!selectedClassId}
+                      >
+                         <option value="">Select Subject</option>
+                         {classSubjects
+                           .filter(cs => !selectedClassId || cs.class_id === selectedClassId)
+                           .map(cs => {
+                             const subj = subjects.find(s => s.id === cs.subject_id);
+                             return <option key={`award-cs-${cs.id}`} value={cs.id}>{subj?.name}</option>
+                           })}
+                      </select>
+                   </div>
                 </div>
              </div>
 
@@ -2848,37 +3604,89 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                               </div>
                             </th>
                             <th className="px-10 py-6 text-[9px] uppercase tracking-wider text-slate-500 font-bold">Student Identity</th>
-                            <th className="px-10 py-6 text-[9px] uppercase tracking-wider text-slate-500 font-bold">Obtained</th>
-                            <th className="px-10 py-6 text-[9px] uppercase tracking-wider text-slate-500 font-bold">Total</th>
-                            <th className="px-10 py-6 text-[9px] uppercase tracking-wider text-slate-500 font-bold text-right">Performance Index</th>
+                            <th className="px-10 py-6 text-[9px] uppercase tracking-wider text-slate-500 font-bold text-center">Base</th>
+                            <th className="px-10 py-6 text-[9px] uppercase tracking-wider text-slate-500 font-bold text-center">Score</th>
+                            <th className="px-10 py-6 text-[9px] uppercase tracking-wider text-slate-500 font-bold text-center">Rank</th>
+                            <th className="px-10 py-6 text-[9px] uppercase tracking-wider text-slate-500 font-bold text-right">Judgement</th>
                          </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 dark:divide-slate-800/50">
-                         {sortedExamResults.map((res, i) => {
-                           const student = classStudents.find(s => s.id === res.student_id) || searchResults.find(s => s.id === res.student_id);
-                           const percent = (res.obtained_marks / res.total_marks) * 100;
-                           return (
-                             <tr key={`award-list-row-${i}`} className="hover:bg-emerald-500/5 transition-all group">
-                                <td className="px-10 py-6 font-mono text-[10px] text-slate-500 tracking-widest">{student?.admission_no || `ID-${res.student_id}`}</td>
-                                <td className="px-10 py-6">
-                                   <p className="text-[10px] font-bold text-slate-900 dark:text-white uppercase tracking-widest group-hover:text-emerald-500 transition-colors">{student?.name || 'Academic Record'}</p>
-                                </td>
-                                <td className="px-10 py-6 text-[11px] font-bold text-emerald-500">{res.obtained_marks}</td>
-                                <td className="px-10 py-6 text-[11px] font-bold text-slate-400">{res.total_marks}</td>
-                                <td className="px-10 py-6 text-right">
-                                   <div className={`inline-flex items-center gap-2 px-4 py-1.5 rounded-full border font-bold text-[9px] uppercase tracking-widest ${res.obtained_marks >= res.passing_marks ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20' : 'bg-rose-500/10 text-rose-500 border-rose-500/20'}`}>
-                                      {res.obtained_marks >= res.passing_marks ? 'SUCCESS' : 'FAILURE'} — {Math.round(percent)}%
-                                   </div>
-                                </td>
-                             </tr>
-                           );
+                         {selectedClassSubjectId && sortedStudents.map((student, i) => {
+                            const csSelected = classSubjects.find(x => x.id === parseInt(selectedClassSubjectId));
+                            const res = examResults.find(r => 
+                               r.student_id === student.id && 
+                               r.session_id === parseInt(selectedSessionId) && 
+                               r.semester_id === parseInt(selectedSemesterId) &&
+                               r.subject_id === csSelected?.subject_id
+                            );
+                            const percent = res ? (res.obtained_marks / res.total_marks) * 100 : 0;
+                            return (
+                              <tr key={`award-list-row-${i}`} className="hover:bg-indigo-500/5 dark:hover:bg-indigo-500/5 transition-all group border-b border-slate-100 dark:border-slate-800/80">
+                                 <td className="px-10 py-6">
+                                    <span className="font-mono text-[9px] font-black uppercase tracking-[0.05em] bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 px-3 py-1.5 rounded-lg border border-slate-200/50 dark:border-slate-700/50 shadow-sm">
+                                       {student?.admission_no}
+                                    </span>
+                                 </td>
+                                 <td className="px-10 py-6">
+                                    <div className="flex flex-col">
+                                       <span className="text-[11px] font-black text-slate-900 dark:text-white uppercase tracking-widest group-hover:text-indigo-500 transition-colors duration-200">{student?.name}</span>
+                                       <span className="text-[9px] text-slate-400 dark:text-slate-500 uppercase tracking-widest mt-1">S/O: {student?.father_name || 'N/A'}</span>
+                                    </div>
+                                 </td>
+                                 <td className="px-10 py-6 text-center">
+                                    <span className="inline-flex items-center justify-center px-3 py-1 text-[10px] font-mono font-bold rounded-lg bg-slate-100 dark:bg-slate-800/70 border border-slate-200/50 dark:border-slate-700/20 text-slate-500 dark:text-slate-400">
+                                       {res?.total_marks || csSelected?.total_marks || '-'}
+                                    </span>
+                                 </td>
+                                 <td className="px-10 py-6 text-center">
+                                    <span className="inline-flex items-center justify-center px-3 py-1 text-[11px] font-mono font-black rounded-lg bg-indigo-500/5 dark:bg-indigo-500/10 text-slate-850 dark:text-indigo-300 border border-indigo-500/20 shadow-sm">
+                                       {res?.obtained_marks ?? '-'}
+                                    </span>
+                                 </td>
+                                 <td className="px-10 py-6 text-center">
+                                    {getGradeBadge(res?.grade)}
+                                 </td>
+                                 <td className="px-10 py-6 text-right">
+                                    {res ? (
+                                       res.obtained_marks >= res.passing_marks ? (
+                                          <div className="inline-flex items-center gap-2 px-4.5 py-2 rounded-2xl border font-black text-[9px] uppercase tracking-[0.15em] bg-gradient-to-r from-emerald-500/15 to-teal-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30 shadow-[0_0_15px_rgba(16,185,129,0.1)] ring-1 ring-emerald-500/20 transition-all duration-300 hover:scale-[1.02]">
+                                             <span className="relative flex h-2 w-2">
+                                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                                             </span>
+                                             <span>QUALIFIED</span>
+                                             <span className="text-slate-300 dark:text-slate-700">|</span>
+                                             <span className="font-mono font-black text-emerald-500">{Math.round(percent)}%</span>
+                                          </div>
+                                       ) : (
+                                          <div className="inline-flex items-center gap-2 px-4.5 py-2 rounded-2xl border font-black text-[9px] uppercase tracking-[0.15em] bg-gradient-to-r from-rose-500/15 to-red-500/10 text-rose-600 dark:text-rose-400 border-rose-500/30 shadow-[0_0_15px_rgba(244,63,94,0.1)] ring-1 ring-rose-500/20 transition-all duration-300 hover:scale-[1.02]">
+                                             <span className="relative flex h-2 w-2">
+                                                <span className="animate-pulse absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+                                                <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
+                                             </span>
+                                             <span>FAILED</span>
+                                             <span className="text-slate-300 dark:text-slate-700">|</span>
+                                             <span className="font-mono font-black text-rose-500">{Math.round(percent)}%</span>
+                                          </div>
+                                       )
+                                    ) : (
+                                       <div className="inline-flex items-center gap-2 px-4.5 py-2 rounded-2xl border font-black text-[9px] uppercase tracking-[0.15em] bg-slate-100 dark:bg-slate-800/80 text-amber-600 dark:text-amber-400 border-amber-500/20 shadow-sm shadow-amber-500/5 animate-pulse">
+                                          <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                                          <span>PENDING</span>
+                                       </div>
+                                    )}
+                                 </td>
+                              </tr>
+                            );
                          })}
                       </tbody>
                    </table>
                 </div>
-                {examResults.length === 0 && (
-                   <div className="py-24 text-center">
-                      <p className="text-[9px] text-slate-500 uppercase tracking-widest">No award list generated for active parameters</p>
+                {(!selectedClassSubjectId || sortedStudents.length === 0) && (
+                   <div className="py-24 text-center bg-slate-50/50 dark:bg-slate-900/10 transition-all">
+                      <Award className="w-16 h-16 text-slate-200 dark:text-slate-800 mx-auto mb-6 stroke-1" />
+                      <p className="text-[10px] text-slate-400 uppercase tracking-[0.3em] font-bold">Awaiting Specification Parameters</p>
+                      <p className="text-[9px] text-slate-500 uppercase tracking-widest mt-2 italic">Select session, semester, class and subject to view awarded marks list</p>
                    </div>
                 )}
              </div>
@@ -3182,9 +3990,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
               <div className="flex bg-slate-100 dark:bg-slate-900/50 p-1.5 rounded-2xl border border-slate-200 dark:border-slate-800 backdrop-blur-md self-start">
                 {[
                   { id: 'class-daily', label: 'Daily Pulse', icon: BarChart3 },
-                  { id: 'class-historical', label: 'Class Analytics', icon: History },
-                  { id: 'staff-logs', label: 'Staff Terminal', icon: Clock },
-                  { id: 'personal', label: 'My Performance', icon: User }
+                  { id: 'class-historical', label: 'Class Analytics', icon: History }
                 ].map((tab) => (
                   <button 
                     key={`report-tab-${tab.id}`}
@@ -3470,254 +4276,177 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                 )}
               </div>
             )}
+          </motion.div>
+        )}
 
-            {reportSubTab === 'staff-logs' && (
-              <div className="space-y-12">
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
-                  {[
-                    { label: 'Total Personnel', val: todaySummary.total, color: 'white', icon: Users },
-                    { label: 'Present Today', val: todaySummary.present, color: 'emerald', icon: UserCheck },
-                    { label: 'Off-Duty/Absent', val: todaySummary.absent, color: 'rose', icon: UserX },
-                    { label: 'Active Sessions', val: todaySummary.onClock, color: 'blue', icon: Clock }
-                  ].map((stat, i) => (
-                    <div key={`staff-summary-${i}`} className="bg-card border border-slate-800 p-8 rounded-[2.5rem] shadow-lg relative overflow-hidden group">
-                      <div className="absolute top-0 right-0 p-3 text-slate-800/10 group-hover:text-emerald-500/5 transition-colors">
-                        <stat.icon className="w-16 h-16" />
-                      </div>
-                      <p className="text-[10px] text-slate-500 uppercase tracking-[0.2em] font-bold mb-4">{stat.label}</p>
-                      <p className={`text-4xl font-bold text-${stat.color}-500 tabular-nums`}>{stat.val}</p>
-                    </div>
-                  ))}
+        {activeTab === 'reports' && activeSubTab === 'report-staff' && (
+          <motion.div key="report-staff" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-8 pb-20 text-left">
+            <div className="space-y-1">
+              <h3 className="text-2xl font-bold tracking-[0.1em] uppercase text-slate-900 dark:text-white leading-tight">Master Verification Terminal</h3>
+              <p className="text-[10px] text-emerald-500 uppercase tracking-widest font-bold">Staff attendance surveillance and duration metrics for {schoolName || 'Instituition'}</p>
+            </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+              {[
+                { label: 'Total Personnel', val: todaySummary.total, color: 'text-white', icon: Users },
+                { label: 'Present Today', val: todaySummary.present, color: 'text-emerald-500', icon: UserCheck },
+                { label: 'Off-Duty/Leave', val: todaySummary.absent, color: 'text-rose-500', icon: UserX },
+                { label: 'Active Sessions', val: todaySummary.onClock, color: 'text-blue-500', icon: Clock }
+              ].map((stat, i) => (
+                <div key={`staff-stat-rep-${i}`} className="bg-card border border-slate-800 p-8 rounded-[2.5rem] shadow-lg relative overflow-hidden group">
+                  <div className="absolute top-0 right-0 p-3 text-slate-800/10 group-hover:text-emerald-500/5 transition-colors">
+                    <stat.icon className="w-16 h-16" />
+                  </div>
+                  <p className="text-[10px] text-slate-500 uppercase tracking-[0.2em] font-bold mb-4">{stat.label}</p>
+                  <p className={`text-4xl font-bold ${stat.color} tabular-nums`}>{stat.val}</p>
                 </div>
+              ))}
+            </div>
 
-                <div className="bg-card border border-slate-800 p-10 rounded-[3rem] shadow-2xl space-y-8 relative overflow-hidden">
-                   <div className="flex items-center gap-4 mb-2">
-                     <div className="w-1.5 h-6 bg-emerald-500 rounded-full" />
-                     <h4 className="text-lg font-bold uppercase tracking-[0.2em] text-white">Filter Parameters</h4>
-                   </div>
-                   
-                   <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-                     <div className="space-y-3">
-                       <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Faculty Member</label>
-                       <select 
-                         value={reportFilters.teacherId}
-                         onChange={(e) => setReportFilters({...reportFilters, teacherId: e.target.value})}
-                         className="w-full bg-[#020617] border border-slate-800 rounded-2xl px-5 py-4 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner"
-                       >
-                         <option value="">Full Directory</option>
-                         {teachers.map((t, i) => <option key={`staff-opt-${t.id || i}`} value={t.id}>{t.name}</option>)}
-                       </select>
-                     </div>
-                     <div className="space-y-3">
-                       <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Start Cycle</label>
-                       <input 
-                         type="date"
-                         value={reportFilters.startDate}
-                         onChange={(e) => setReportFilters({...reportFilters, startDate: e.target.value})}
-                         className="w-full bg-[#020617] border border-slate-800 rounded-2xl px-5 py-4 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner"
-                       />
-                     </div>
-                     <div className="space-y-3">
-                       <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">End Cycle</label>
-                       <input 
-                         type="date"
-                         value={reportFilters.endDate}
-                         onChange={(e) => setReportFilters({...reportFilters, endDate: e.target.value})}
-                         className="w-full bg-[#020617] border border-slate-800 rounded-2xl px-5 py-4 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner"
-                       />
-                     </div>
-                   </div>
-                   <button 
-                     onClick={generateTeacherReport}
-                     className="w-full py-5 bg-emerald-500 text-slate-950 font-bold uppercase tracking-[0.3em] text-[10px] rounded-[2rem] hover:bg-emerald-400 hover:scale-[1.01] active:scale-[0.99] transition-all shadow-xl shadow-emerald-500/20"
+            <div className="bg-card border border-slate-800 p-10 rounded-[3rem] shadow-2xl space-y-8 relative overflow-hidden">
+               <div className="flex items-center gap-4 mb-2">
+                 <div className="w-1.5 h-6 bg-emerald-500 rounded-full" />
+                 <h4 className="text-lg font-bold uppercase tracking-[0.2em] text-white">Filter Parameters</h4>
+               </div>
+               
+               <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+                 <div className="space-y-3">
+                   <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Officer Profile</label>
+                   <select 
+                     value={reportFilters.teacherId}
+                     onChange={(e) => setReportFilters({...reportFilters, teacherId: e.target.value})}
+                     className="w-full bg-[#020617] border border-slate-800 rounded-2xl px-5 py-4 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner"
                    >
-                     Initialize Log Synthesis
-                   </button>
-                </div>
+                     <option value="">Full Directory</option>
+                     {teachers.map((t, i) => <option key={`staff-opt-rep-${t.id || i}`} value={t.id}>{t.name}</option>)}
+                   </select>
+                 </div>
+                 <div className="space-y-3">
+                   <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Start Cycle</label>
+                   <input 
+                     type="date"
+                     value={reportFilters.startDate}
+                     onChange={(e) => setReportFilters({...reportFilters, startDate: e.target.value})}
+                     className="w-full bg-[#020617] border border-slate-800 rounded-2xl px-5 py-4 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner"
+                   />
+                 </div>
+                 <div className="space-y-3">
+                   <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">End Cycle</label>
+                   <input 
+                     type="date"
+                     value={reportFilters.endDate}
+                     onChange={(e) => setReportFilters({...reportFilters, endDate: e.target.value})}
+                     className="w-full bg-[#020617] border border-slate-800 rounded-2xl px-5 py-4 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner"
+                   />
+                 </div>
+               </div>
+               <div className="flex gap-4">
+                  <button 
+                    onClick={generateTeacherReport}
+                    className="flex-1 py-5 bg-emerald-500 text-slate-950 font-bold uppercase tracking-[0.3em] text-[10px] rounded-[2rem] hover:bg-emerald-400 hover:scale-[1.01] active:scale-[0.99] transition-all shadow-xl shadow-emerald-500/20"
+                  >
+                    Initialize Log Synthesis
+                  </button>
+                  {teacherAttendanceLogs.length > 0 && (
+                    <button 
+                       onClick={() => {
+                        const doc = new jsPDF() as any;
+                        doc.setFontSize(18);
+                        doc.text(schoolName || 'School Information System', 14, 20);
+                        doc.setFontSize(12);
+                        doc.text('Detailed Staff Attendance Report', 14, 28);
+                        doc.setFontSize(8);
+                        doc.text(`Period: ${reportFilters.startDate} to ${reportFilters.endDate}`, 14, 34);
+                        doc.text(`Generated on: ${new Date().toLocaleString()}`, 14, 40);
 
-                {teacherAttendanceLogs.length > 0 ? (
-                  <div className="bg-card border border-slate-800 rounded-[3rem] overflow-hidden shadow-2xl">
-                    <div className="p-10 border-b border-slate-800 bg-[#020617]/50 flex justify-between items-center">
-                       <div className="flex items-center gap-5">
-                         <div className="p-4 rounded-2xl bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
-                            <History className="w-6 h-6" />
-                         </div>
-                         <div>
-                           <h4 className="text-xl font-bold uppercase tracking-widest text-white leading-tight">Faculty Terminal Logs</h4>
-                           <p className="text-[10px] text-emerald-500 uppercase tracking-widest font-bold mt-1">{teacherAttendanceLogs.length} Validated Records Found</p>
-                         </div>
-                       </div>
-                    </div>
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-left border-collapse">
-                        <thead>
-                          <tr className="bg-slate-900/30">
-                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Cycle Date</th>
-                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Officer Profile</th>
-                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Check-In</th>
-                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Check-Out</th>
-                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-emerald-500 font-bold">Session Delta</th>
-                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Verification</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-800/50">
-                          {teacherAttendanceLogs.map((log, i) => {
-                            const teacher = teachers.find(t => t.id === log.teacher_id);
-                            return (
-                              <tr key={`staff-log-${log.id || i}`} className="hover:bg-slate-900/20 transition-all group">
-                                <td className="px-10 py-8 text-[11px] font-mono text-slate-500 uppercase tracking-widest">{log.attendance_date}</td>
-                                <td className="px-10 py-8">
-                                  <div className="flex items-center gap-4">
-                                     <div className="w-10 h-10 rounded-xl bg-slate-800 flex items-center justify-center text-emerald-500 font-bold border border-slate-700 group-hover:border-emerald-500 transition-all">
-                                       {teacher?.name?.charAt(0) || '?'}
-                                     </div>
-                                     <div>
-                                       <p className="text-[11px] font-bold text-white uppercase tracking-widest leading-none mb-1.5">{teacher?.name || 'Unknown User'}</p>
-                                       <p className="text-[9px] text-slate-500 uppercase font-bold tracking-tighter">{teacher?.designation || 'Staff'}</p>
-                                     </div>
-                                  </div>
-                                </td>
-                                <td className="px-10 py-8 text-[11px] font-mono text-slate-400">{log.check_in || '--:--:--'}</td>
-                                <td className="px-10 py-8 text-[11px] font-mono text-slate-400">{log.check_out || 'Active Session'}</td>
-                                <td className="px-10 py-8 text-[11px] font-bold text-emerald-400 font-mono tracking-tighter">{log.duration || '00:00'}</td>
-                                <td className="px-10 py-8">
-                                  <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border font-bold text-[9px] uppercase tracking-widest ${log.status === 'Present' ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20' : 'bg-slate-800 text-slate-500 border-slate-700'}`}>
-                                    <div className={`w-1.5 h-1.5 rounded-full ${log.status === 'Present' ? 'bg-emerald-500 animate-pulse' : 'bg-slate-600'}`} />
-                                    {log.status}
-                                  </div>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="py-40 text-center bg-card border border-dashed border-slate-800 rounded-[3rem] shadow-inner">
-                    <div className="w-20 h-20 bg-slate-900/50 rounded-[2rem] flex items-center justify-center mx-auto mb-6 border border-slate-800">
-                       <Clock className="w-8 h-8 text-slate-600" />
-                    </div>
-                    <h3 className="text-lg font-bold text-white uppercase tracking-[0.2em] mb-2">No Verified Logs</h3>
-                    <p className="text-xs text-slate-500 uppercase tracking-widest max-w-xs mx-auto leading-relaxed">System scan complete. No logs matching the active filter parameters were located in the secure database.</p>
-                  </div>
-                )}
-                </div>
-              )}
+                        const tableData = teacherAttendanceLogs.map(log => {
+                          const t = teachers.find(x => x.id === log.teacher_id);
+                          return [
+                            log.attendance_date,
+                            t?.name || 'Unknown',
+                            log.check_in || '--:--:--',
+                            log.check_out || 'Active',
+                            log.duration || '00:00',
+                            log.status
+                          ];
+                        });
 
-            {reportSubTab === 'staff-logs' && (
-              <div className="space-y-6">
-                <div className="bg-card border border-slate-800 p-8 rounded-[2.5rem] shadow-2xl relative overflow-hidden group">
-                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 relative z-10">
-                     <div className="space-y-3">
-                       <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Officer Selection</label>
-                       <select 
-                         value={reportFilters.teacherId}
-                         onChange={(e) => setReportFilters({...reportFilters, teacherId: e.target.value})}
-                         className="w-full bg-[#020617] border border-slate-800 rounded-2xl px-5 py-4 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner"
-                       >
-                         <option value="">Select Staff Member</option>
-                         {teachers.map(t => <option key={`log-t-${t.id}`} value={t.id}>{t.name}</option>)}
-                       </select>
+                        autoTable(doc, {
+                          startY: 46,
+                          head: [['Date', 'Personnel', 'In', 'Out', 'Duration', 'Verification']],
+                          body: tableData,
+                          styles: { fontSize: 8, font: 'helvetica' },
+                          headStyles: { fillColor: [16, 185, 129] }
+                        });
+                        doc.save(`Staff_Attendance_Report_${reportFilters.startDate}.pdf`);
+                       }}
+                       className="p-5 bg-slate-900 border border-slate-800 text-white rounded-3xl hover:bg-slate-800 transition-all flex items-center justify-center shadow-lg"
+                    >
+                      <FileText className="w-5 h-5" />
+                    </button>
+                  )}
+               </div>
+            </div>
+
+            {teacherAttendanceLogs.length > 0 ? (
+              <div className="bg-card border border-slate-800 rounded-[3rem] overflow-hidden shadow-2xl">
+                <div className="p-10 border-b border-slate-800 bg-[#020617]/50 flex justify-between items-center">
+                   <div className="flex items-center gap-5">
+                     <div className="p-4 rounded-2xl bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
+                        <History className="w-6 h-6" />
                      </div>
-                     <div className="space-y-3">
-                       <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Start Cycle</label>
-                       <input 
-                         type="date"
-                         value={reportFilters.startDate}
-                         onChange={(e) => setReportFilters({...reportFilters, startDate: e.target.value})}
-                         className="w-full bg-[#020617] border border-slate-800 rounded-2xl px-5 py-4 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner"
-                       />
-                     </div>
-                     <div className="space-y-3">
-                       <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">End Cycle</label>
-                       <input 
-                         type="date"
-                         value={reportFilters.endDate}
-                         onChange={(e) => setReportFilters({...reportFilters, endDate: e.target.value})}
-                         className="w-full bg-[#020617] border border-slate-800 rounded-2xl px-5 py-4 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner"
-                       />
+                     <div>
+                       <h4 className="text-xl font-bold uppercase tracking-widest text-white leading-tight">Faculty Terminal Logs</h4>
+                       <p className="text-[10px] text-emerald-500 uppercase tracking-widest font-bold mt-1">{teacherAttendanceLogs.length} Validated Records Found</p>
                      </div>
                    </div>
-                   <button 
-                     onClick={generateTeacherReport}
-                     className="w-full py-5 bg-emerald-500 text-slate-950 font-bold uppercase tracking-[0.3em] text-[10px] rounded-[2rem] hover:bg-emerald-400 hover:scale-[1.01] active:scale-[0.99] transition-all shadow-xl shadow-emerald-500/20 mt-8"
-                   >
-                     Initialize Log Synthesis
-                   </button>
                 </div>
-
-                {teacherAttendanceLogs.length > 0 ? (
-                  <div className="bg-card border border-slate-800 rounded-[3rem] overflow-hidden shadow-2xl">
-                    <div className="p-10 border-b border-slate-800 bg-[#020617]/50 flex justify-between items-center">
-                       <div className="flex items-center gap-5">
-                         <div className="p-4 rounded-2xl bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
-                            <History className="w-6 h-6" />
-                         </div>
-                         <div>
-                           <h4 className="text-xl font-bold uppercase tracking-widest text-white leading-tight">Faculty Terminal Logs</h4>
-                           <p className="text-[10px] text-emerald-500 uppercase tracking-widest font-bold mt-1">{teacherAttendanceLogs.length} Validated Records Found</p>
-                         </div>
-                       </div>
-                    </div>
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-left border-collapse">
-                        <thead>
-                          <tr className="bg-slate-900/30">
-                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Cycle Date</th>
-                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Officer Profile</th>
-                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Check-In</th>
-                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Check-Out</th>
-                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-emerald-500 font-bold">Session Delta</th>
-                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Verification</th>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-slate-900/30">
+                        <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Cycle Date</th>
+                        <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Officer Profile</th>
+                        <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold text-center">Check-In</th>
+                        <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold text-center">Check-Out</th>
+                        <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-emerald-500 font-bold text-center">Session Delta</th>
+                        <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold text-right">Verification</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/50">
+                      {teacherAttendanceLogs.map((log, i) => {
+                        const teacher = teachers.find(t => t.id === log.teacher_id);
+                        return (
+                          <tr key={`staff-log-rep-final-${log.id || i}`} className="hover:bg-slate-900/20 transition-all group">
+                            <td className="px-10 py-8 text-[11px] font-mono text-slate-500 uppercase tracking-widest font-bold">{log.attendance_date}</td>
+                            <td className="px-10 py-8">
+                               <p className="text-[11px] font-bold text-white uppercase tracking-widest leading-none mb-1.5 group-hover:text-emerald-400 transition-colors">{teacher?.name || 'Unknown User'}</p>
+                               <p className="text-[9px] text-slate-500 uppercase font-bold tracking-tighter">{teacher?.designation || 'Staff'}</p>
+                            </td>
+                            <td className="px-10 py-8 text-[11px] font-mono text-slate-400 text-center">{log.check_in || '--:--:--'}</td>
+                            <td className="px-10 py-8 text-[11px] font-mono text-slate-400 text-center">{log.check_out || 'Active'}</td>
+                            <td className="px-10 py-8 text-[11px] font-bold text-emerald-400 font-mono tracking-tighter text-center">{log.duration || '00:00'}</td>
+                            <td className="px-10 py-8 text-right">
+                              <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border font-bold text-[9px] uppercase tracking-widest ${log.status === 'Present' ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20' : 'bg-slate-800 text-slate-500 border-slate-700'}`}>
+                                {log.status}
+                              </span>
+                            </td>
                           </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-800/50">
-                          {teacherAttendanceLogs.map((log, i) => {
-                            const teacher = teachers.find(t => t.id === log.teacher_id);
-                            return (
-                              <tr key={`staff-log-${log.id || i}`} className="hover:bg-slate-900/20 transition-all group">
-                                <td className="px-10 py-8 text-[11px] font-mono text-slate-500 uppercase tracking-widest">{log.attendance_date}</td>
-                                <td className="px-10 py-8">
-                                  <div className="flex items-center gap-4">
-                                     <div className="w-10 h-10 rounded-xl bg-slate-800 flex items-center justify-center text-emerald-500 font-bold border border-slate-700 group-hover:border-emerald-500 transition-all">
-                                       {teacher?.name?.charAt(0) || '?'}
-                                     </div>
-                                     <div>
-                                       <p className="text-[11px] font-bold text-white uppercase tracking-widest leading-none mb-1.5">{teacher?.name || 'Unknown User'}</p>
-                                       <p className="text-[9px] text-slate-500 uppercase font-bold tracking-tighter">{teacher?.designation || 'Staff'}</p>
-                                     </div>
-                                  </div>
-                                </td>
-                                <td className="px-10 py-8 text-[11px] font-mono text-slate-400">{log.check_in || '--:--:--'}</td>
-                                <td className="px-10 py-8 text-[11px] font-mono text-slate-400">{log.check_out || 'Active Session'}</td>
-                                <td className="px-10 py-8 text-[11px] font-bold text-emerald-400 font-mono tracking-tighter">{log.duration || '00:00'}</td>
-                                <td className="px-10 py-8">
-                                  <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border font-bold text-[9px] uppercase tracking-widest ${log.status === 'Present' ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20' : 'bg-slate-800 text-slate-500 border-slate-700'}`}>
-                                    <div className={`w-1.5 h-1.5 rounded-full ${log.status === 'Present' ? 'bg-emerald-500 animate-pulse' : 'bg-slate-600'}`} />
-                                    {log.status}
-                                  </div>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="py-40 text-center bg-card border border-dashed border-slate-800 rounded-[3rem] shadow-inner">
-                    <div className="w-20 h-20 bg-slate-900/50 rounded-[2rem] flex items-center justify-center mx-auto mb-6 border border-slate-800">
-                       <Clock className="w-8 h-8 text-slate-600" />
-                    </div>
-                    <h3 className="text-lg font-bold text-white uppercase tracking-[0.2em] mb-2">No Verified Logs</h3>
-                    <p className="text-xs text-slate-500 uppercase tracking-widest max-w-xs mx-auto leading-relaxed">System scan complete. No logs matching the active filter parameters were located in the secure database.</p>
-                  </div>
-                )}
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : (
+              <div className="py-40 text-center bg-card border border-dashed border-slate-800 rounded-[3rem] shadow-inner">
+                <div className="w-20 h-20 bg-slate-900/50 rounded-[2rem] flex items-center justify-center mx-auto mb-6 border border-slate-800">
+                   <Clock className="w-8 h-8 text-slate-600" />
+                </div>
+                <h3 className="text-lg font-bold text-white uppercase tracking-[0.2em] mb-2">Null Scan Result</h3>
+                <p className="text-xs text-slate-500 uppercase tracking-widest max-w-xs mx-auto leading-relaxed">No logs matching the current criteria were identified. Please adjust the filters to broaden the search.</p>
               </div>
             )}
-            
-            {/* Note: 'personal' subtab content was moved to the main report-personal subtab level */}
           </motion.div>
         )}
 
@@ -3996,6 +4725,323 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                       {isUpdatingPassword ? 'Hashing & Updating...' : 'Update Password'}
                     </button>
                   </form>
+                </div>
+
+                {/* CSV BULK STUDENT IMPORT CARD */}
+                <div className="lg:col-span-2 bg-card border border-border p-8 rounded-[2.5rem] space-y-6 shadow-2xl transition-all hover:border-emerald-500/20">
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <h4 className="text-sm font-bold uppercase tracking-widest text-emerald-400 mb-1">Student Bulk CSV Terminal</h4>
+                      <p className="text-[10px] text-slate-500 uppercase tracking-widest">Enrol hundreds of students and auto-provision academic classes via spreadsheets</p>
+                    </div>
+                    <div className="p-3 bg-emerald-500/10 rounded-2xl text-emerald-500">
+                      <Database className="w-5 h-5" />
+                    </div>
+                  </div>
+
+                  {/* 1. INITIAL UPLOAD DRAG-DROP BOX */}
+                  {!csvFile && !csvImportProgress && !csvImportResult && (
+                    <div className="space-y-4">
+                      <div 
+                        onDragOver={(e) => { e.preventDefault(); setIsDraggingCsv(true); }}
+                        onDragLeave={() => setIsDraggingCsv(false)}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          setIsDraggingCsv(false);
+                          if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                            handleCsvFileSelect(e.dataTransfer.files[0]);
+                          }
+                        }}
+                        onClick={() => document.getElementById('student-csv-uploader')?.click()}
+                        className={`border-2 border-dashed rounded-[2rem] p-10 flex flex-col items-center justify-center gap-4 cursor-pointer transition-all duration-300 ${
+                          isDraggingCsv 
+                            ? 'border-emerald-500 bg-emerald-500/5 shadow-[0_0_20px_rgba(16,185,129,0.1)]' 
+                            : 'border-slate-200 dark:border-slate-800 hover:border-emerald-500/40 hover:bg-slate-50/50 dark:hover:bg-slate-900/30'
+                        }`}
+                      >
+                        <input 
+                          type="file" 
+                          id="student-csv-uploader" 
+                          accept=".csv,.xlsx,.xls" 
+                          className="hidden" 
+                          onChange={(e) => {
+                            if (e.target.files && e.target.files[0]) {
+                              handleCsvFileSelect(e.target.files[0]);
+                            }
+                          }}
+                        />
+                        <div className="w-16 h-16 rounded-3xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 hover:text-emerald-500 transition-all">
+                          <Upload className="w-8 h-8 text-slate-400 dark:text-slate-500 animate-bounce" />
+                        </div>
+                        <div className="text-center space-y-1">
+                          <p className="text-xs font-bold uppercase tracking-wider text-slate-800 dark:text-slate-200">Drag & Drop Spreadsheet File</p>
+                          <p className="text-[10px] text-slate-400 uppercase tracking-widest">or click to browse local files (supports .csv, .xlsx, .xls)</p>
+                        </div>
+                      </div>
+
+                      {/* TEMPLATE SCHEMATIC INFO */}
+                      <div className="bg-slate-50 dark:bg-[#020617]/50 border border-slate-100 dark:border-slate-800/80 rounded-2xl p-5 space-y-3">
+                        <div className="flex items-center gap-2 text-emerald-500">
+                          <FileText className="w-4 h-4" />
+                          <span className="text-[10px] font-bold uppercase tracking-widest">Supported Spreadsheet Columns Mapping</span>
+                        </div>
+                        <p className="text-[9px] text-slate-400 uppercase leading-relaxed">
+                          Your spreadsheet may contain any or all of the following columns from the source export. If headers are differently named, the terminal will let you map them interactively in the next step:
+                        </p>
+                        <div className="flex flex-wrap gap-1.5 pt-1">
+                          {['Student ID', 'Name', 'Father Name', 'Father CNIC', 'Gender', 'School Name', 'School Gender', 'EMIS Code', 'Class Name', 'Class Section', 'Session Year', 'Student Status', 'Class Status', 'Vaccinated', 'Disability', 'Religion', 'Nationality', 'Date of Birth', 'Hafiz Quran', 'Orphan', 'Admission Date', 'District', 'Tehsil', 'Class Enrolment Date', 'Admission #', 'Double Shift', 'Emergency No', 'Form-B', 'Model Type', 'School Level', 'Shift', 'Guardian CNIC', 'Guardian Name', 'Father Mobile No', 'Student Mobile No'].map((col) => (
+                            <span key={`csv-col-tag-${col}`} className="text-[8px] font-mono font-bold bg-slate-100 dark:bg-slate-800 border border-slate-200/50 dark:border-slate-700/20 text-slate-500 px-2 py-1 rounded">
+                              {col}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 2. LOADING SPIN AREA FOR PARSING */}
+                  {isParsingCsv && (
+                    <div className="border border-slate-200 dark:border-slate-800 rounded-3xl p-12 flex flex-col items-center justify-center gap-3 bg-slate-50 dark:bg-slate-900/10">
+                      <div className="w-10 h-10 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
+                      <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-2">Analysing File Schema & Compiling Headers...</p>
+                    </div>
+                  )}
+
+                  {/* 3. COLUMNS MAPPING & PREVIEW GATES */}
+                  {csvFile && csvHeaders.length > 0 && !isParsingCsv && !csvImportProgress && !csvImportResult && (
+                    <div className="space-y-6">
+                      {/* FILE DETAILS BANNER */}
+                      <div className="bg-gradient-to-r from-emerald-500/10 to-teal-500/5 border border-emerald-500/20 p-4 rounded-2xl flex items-center justify-between">
+                        <div>
+                          <p className="text-xs font-black uppercase text-white tracking-widest">{csvFile.name}</p>
+                          <p className="text-[9px] font-mono text-emerald-400 uppercase tracking-wider mt-1">
+                            {csvRows.length} Rows Discovered • {(csvFile.size / 1024).toFixed(1)} KB
+                          </p>
+                        </div>
+                        <button 
+                          onClick={() => {
+                            setCsvFile(null);
+                            setCsvHeaders([]);
+                            setCsvRows([]);
+                            setColumnMapping({});
+                          }}
+                          className="px-4 py-2 hover:bg-slate-100 dark:hover:bg-slate-850 text-slate-600 dark:text-slate-400 text-[9px] font-bold uppercase tracking-widest rounded-xl transition cursor-pointer"
+                        >
+                          Clear File
+                        </button>
+                      </div>
+
+                      {/* PARAMETERS CONFIGURATOR */}
+                      <div className="grid md:grid-cols-2 gap-4 bg-[#020617]/40 border border-slate-200/40 dark:border-slate-800/80 p-5 rounded-2xl">
+                        <div className="flex items-center justify-between">
+                          <label className="flex flex-col gap-0.5 pointer-events-auto cursor-pointer">
+                            <span className="text-[10px] font-bold uppercase text-white tracking-wider">Auto-Create Entities</span>
+                            <span className="text-[8px] text-slate-400 uppercase tracking-widest">Provision missing Classes and Sections instantly</span>
+                          </label>
+                          <input 
+                            type="checkbox" 
+                            checked={autoCreateEntities} 
+                            onChange={(e) => setAutoCreateEntities(e.target.checked)} 
+                            className="w-4 h-4 text-emerald-500 border-slate-200 focus:ring-emerald-500 rounded cursor-pointer"
+                          />
+                        </div>
+
+                        <div className="space-y-1">
+                          <label className="text-[9px] text-slate-400 uppercase tracking-widest ml-1">Default Enrolment Type</label>
+                          <select 
+                            value={defaultEnrollmentType} 
+                            onChange={(e: any) => setDefaultEnrollmentType(e.target.value)} 
+                            className="w-full bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none transition"
+                          >
+                            {(['Fresh', 'Public', 'Private', 'Dropout', 'Other'] as const).map(t => (
+                              <option key={`csv-enrol-opt-${t}`} value={t} className="bg-white dark:bg-[#020617] text-slate-900 dark:text-white">{t} Enrolment</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+
+                      {/* ROW MAPPING DETAILS */}
+                      <div className="space-y-3">
+                        <h5 className="text-[10px] font-bold uppercase tracking-widest text-emerald-400">Inter-Column Schema Linker</h5>
+                        <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-4">
+                          {[
+                            { key: 'name', label: 'Student Name (Req.)' },
+                            { key: 'admission_no', label: 'Admission # / ID' },
+                            { key: 'class_name', label: 'Class Name' },
+                            { key: 'section_name', label: 'Class Section' },
+                            { key: 'father_name', label: 'Father Name' },
+                            { key: 'father_cnic', label: 'Father CNIC' },
+                            { key: 'father_mobile_no', label: 'Father Mobile' },
+                            { key: 'gender', label: 'Gender' },
+                            { key: 'date_of_birth', label: 'Date of Birth (DOB)' },
+                            { key: 'session', label: 'Academic Session' },
+                            { key: 'student_status', label: 'Student Status' },
+                            { key: 'class_status', label: 'Class Status' },
+                            { key: 'previous_school_name', label: 'School Name' },
+                            { key: 'previous_school_emis', label: 'EMIS Code' },
+                            { key: 'class_enrolment_date', label: 'Class Enrolment Date/Admission Date' },
+                          ].map((field) => (
+                            <div key={`col-map-field-${field.key}`} className="space-y-1">
+                              <label className="text-[8px] font-bold text-slate-400 uppercase tracking-widest ml-1">{field.label}</label>
+                              <select
+                                value={columnMapping[field.key] || ''}
+                                onChange={(e) => setColumnMapping({ ...columnMapping, [field.key]: e.target.value })}
+                                className="w-full bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-3 py-2 text-[10px] font-medium text-slate-300 focus:border-emerald-500 outline-none transition"
+                              >
+                                <option value="">-- Ignore / Not in File --</option>
+                                {csvHeaders.map(headerName => (
+                                  <option key={`header-opt-${field.key}-${headerName}`} value={headerName}>{headerName}</option>
+                                ))}
+                              </select>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* LIVE DATA PREVIEW PORT */}
+                      <div className="space-y-2 pt-2">
+                        <h5 className="text-[10px] font-bold uppercase tracking-widest text-emerald-400">Verifying Data Stream (First 4 rows preview)</h5>
+                        <div className="overflow-x-auto rounded-2xl border border-slate-200/50 dark:border-slate-800/80">
+                          <table className="w-full text-left border-collapse">
+                            <thead className="bg-[#020617]/80 text-[7px] font-bold uppercase tracking-wider text-slate-500 border-b border-border">
+                              <tr>
+                                <th className="p-3"># Row</th>
+                                <th className="p-3">Admission No</th>
+                                <th className="p-3">Student Name</th>
+                                <th className="p-3">Father Name</th>
+                                <th className="p-3">Class/Sec</th>
+                                <th className="p-3">Gender</th>
+                                <th className="p-3">Session</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-border/40">
+                              {csvRows.slice(0, 4).map((row, rIdx) => {
+                                const getRowVal = (k: string) => {
+                                  const colName = columnMapping[k];
+                                  if (!colName) return '-';
+                                  const idx = csvHeaders.indexOf(colName);
+                                  return idx !== -1 && row[idx] !== undefined && row[idx] !== null ? String(row[idx]).trim() : '-';
+                                };
+                                return (
+                                  <tr key={`prev-row-${rIdx}`} className="hover:bg-slate-50/50 dark:hover:bg-slate-900/30">
+                                    <td className="p-3 text-[9px] font-mono text-slate-500 font-bold">{rIdx + 2}</td>
+                                    <td className="p-3 text-[9px] font-mono font-bold text-indigo-400">{getRowVal('admission_no')}</td>
+                                    <td className="p-3 text-[9px] font-bold uppercase text-white">{getRowVal('name')}</td>
+                                    <td className="p-3 text-[9px] text-slate-400 uppercase">{getRowVal('father_name')}</td>
+                                    <td className="p-3 text-[9px] font-bold uppercase text-emerald-400 font-mono">
+                                      {getRowVal('class_name')} {getRowVal('section_name') !== '-' ? `(Sec ${getRowVal('section_name')})` : ''}
+                                    </td>
+                                    <td className="p-3 text-[9px] text-slate-500 uppercase">{getRowVal('gender')}</td>
+                                    <td className="p-3 text-[9px] text-slate-500 font-mono">{getRowVal('session')}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      {/* EXECUTION CONTROL */}
+                      <div className="pt-2 flex flex-col sm:flex-row gap-3">
+                        <button 
+                          onClick={handleExecuteImport}
+                          className="flex-1 py-4 bg-gradient-to-r from-emerald-500 to-teal-500 hover:scale-[1.01] active:scale-95 text-[#020617] font-black uppercase tracking-widest text-[10px] rounded-2xl shadow-xl shadow-emerald-500/10 cursor-pointer transition-all"
+                        >
+                          Execute Bulk Provisioning ({csvRows.length} Students)
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 4. RUNTIME IMPORT LOADER */}
+                  {csvImportProgress && (
+                    <div className="border border-emerald-500/20 backdrop-blur bg-emerald-500/5 rounded-3xl p-8 space-y-6 flex flex-col justify-center">
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between text-xs font-bold uppercase tracking-widest">
+                          <span className="text-emerald-400 flex items-center gap-2">
+                            <span className="relative flex h-2.5 w-2.5">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+                            </span>
+                            Ingesting Student Registry...
+                          </span>
+                          <span className="text-[#10b981] font-mono">
+                            {Math.round((csvImportProgress.current / csvImportProgress.total) * 100)}%
+                          </span>
+                        </div>
+                        {/* PROGRESS BAR */}
+                        <div className="w-full bg-slate-100 dark:bg-slate-900/60 rounded-full h-3.5 border border-slate-200/50 dark:border-slate-800/80 overflow-hidden relative">
+                          <motion.div 
+                            className="bg-gradient-to-r from-emerald-500 via-emerald-400 to-teal-400 h-full absolute top-0 left-0" 
+                            style={{ width: `${(csvImportProgress.current / csvImportProgress.total) * 100}%` }}
+                            layoutId="csv-loading-bar-tracker"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex items-start gap-3 bg-card border border-border p-4 rounded-xl shadow-sm">
+                        <Database className="w-4 h-4 text-emerald-500 mt-0.5 animate-pulse" />
+                        <div>
+                          <p className="text-[10px] text-slate-300 font-bold uppercase tracking-wider">Database Operation Sub-Routine</p>
+                          <p className="text-[9px] text-slate-500 uppercase font-mono mt-0.5 tracking-wide">{csvImportProgress.status}</p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 5. METRIC RESULTS & ERROR REPORTING CARD */}
+                  {csvImportResult && (
+                    <div className="space-y-6">
+                      <div className="bg-gradient-to-br from-indigo-500/10 to-emerald-500/10 border border-emerald-500/30 p-8 rounded-3xl flex flex-col items-center justify-center text-center space-y-4">
+                        <div className="w-16 h-16 rounded-full bg-emerald-500/15 flex items-center justify-center border border-emerald-500/30 text-emerald-500 shadow-[0_0_25px_rgba(16,185,129,0.15)]">
+                          <CheckCircle className="w-8 h-8 animate-pulse" />
+                        </div>
+                        <div className="space-y-1">
+                          <h5 className="text-sm font-black uppercase text-white tracking-widest">Transaction Set Completed!</h5>
+                          <p className="text-[10px] text-slate-400 uppercase tracking-widest">{csvImportResult.success + csvImportResult.failed} records processed inside database constraints</p>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-4 w-full max-w-sm pt-2">
+                          <div className="bg-emerald-500/5 border border-emerald-500/20 px-4 py-3.5 rounded-2xl flex flex-col items-center">
+                            <span className="text-xl font-mono font-black text-emerald-400">{csvImportResult.success}</span>
+                            <span className="text-[8px] font-bold text-slate-400 uppercase tracking-widest mt-1">Successfully Imported</span>
+                          </div>
+                          <div className={`px-4 py-3.5 rounded-2xl flex flex-col items-center border ${csvImportResult.failed > 0 ? 'bg-rose-500/5 border-rose-500/20 text-rose-400' : 'bg-slate-500/5 border-slate-500/15 text-slate-500'}`}>
+                            <span className="text-xl font-mono font-black">{csvImportResult.failed}</span>
+                            <span className="text-[8px] font-bold uppercase tracking-widest mt-1">Failed Records</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* FAILURES LOGS ACCORDION */}
+                      {csvImportResult.errors.length > 0 && (
+                        <div className="bg-slate-50 dark:bg-[#020617]/40 border border-rose-500/10 rounded-2xl p-5 space-y-3">
+                          <div className="flex items-center gap-2 text-rose-500">
+                            <AlertTriangle className="w-4 h-4" />
+                            <span className="text-[9px] font-bold uppercase tracking-widest">Transaction Exceptions Report ({csvImportResult.errors.length})</span>
+                          </div>
+                          <div className="max-h-[220px] overflow-y-auto space-y-2 pr-2 custom-scrollbar">
+                            {csvImportResult.errors.map((errItem, idx) => (
+                              <div key={`err-log-item-${idx}`} className="bg-slate-100 dark:bg-rose-500/5 border border-rose-500/15 p-3 rounded-xl flex items-start gap-2.5">
+                                <span className="font-mono text-[9px] font-bold text-rose-500 bg-rose-500/10 px-2 py-0.5 rounded border border-rose-500/20">Row {errItem.row}</span>
+                                <p className="text-[9px] font-mono text-slate-400 dark:text-rose-200 mt-0.5 leading-relaxed">{errItem.reason}</p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <button 
+                        onClick={() => {
+                          setCsvImportResult(null);
+                          setCsvFile(null);
+                        }}
+                        className="w-full py-4 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-350 font-bold uppercase tracking-widest text-[10px] rounded-xl hover:bg-slate-200 dark:hover:bg-slate-700 transition"
+                      >
+                        Upload Another Registry
+                      </button>
+                    </div>
+                  )}
                 </div>
             </div>
           </motion.div>
