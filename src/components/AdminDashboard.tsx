@@ -1,0 +1,5158 @@
+import React, { useState, useEffect, useMemo, FormEvent } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
+import { 
+  Users, BarChart3, Shield, Calendar, History, Settings, 
+  UserCheck, UserX, FileText, CheckCircle, Search, 
+  Filter, MoreVertical, Briefcase, Award, User, ChevronRight, ChevronLeft, ChevronDown, UserPlus, UserMinus, Clock, X, Trash2, Plus, Edit,
+  ClipboardList, BookOpen, GraduationCap, Layers, Bell, Star,
+  ArrowUpDown, ArrowUp, ArrowDown
+} from 'lucide-react';
+import { 
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, 
+  ResponsiveContainer, Cell, PieChart, Pie
+} from 'recharts';
+import DashboardLayout from './DashboardLayout';
+import ConfirmationModal from './ConfirmationModal';
+import { Employee, Class, TeacherAttendance, TeacherClassAssignment, Student, Section, LeaveRequest, Session, Semester, Subject, ClassSubject, ExamResult } from '../types';
+import bcrypt from 'bcryptjs';
+import { supabase } from '../lib/supabase';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
+import * as XLSX from 'xlsx';
+
+import { useTheme } from '../context/ThemeContext';
+
+interface AdminDashboardProps {
+  user: Employee;
+  onLogout: () => void;
+}
+
+type AdminTab = 'home' | 'teachers' | 'classes' | 'reports' | 'calendar' | 'exams' | 'profile' | 'requests' | 'stats' | 'settings';
+type AdminSubTab = 
+  | 'exam-marking' | 'exam-results' 
+  | 'class-attendance' | 'class-manage'
+  | 'report-student' | 'report-personal'
+  | 'profile-view' | 'profile-security'
+  | 'req-leave' | 'req-training'
+  | 'staff-list' | 'staff-add';
+
+interface SchoolEvent {
+  id: number;
+  title: string;
+  date: string;
+  type: 'academic' | 'event' | 'exam' | 'holiday' | 'staff';
+  color: string;
+  description?: string;
+  emis?: string;
+}
+
+export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) {
+  const { theme, toggleTheme } = useTheme();
+  const [activeTab, setActiveTab] = useState<AdminTab>('home');
+  const [activeSubTab, setActiveSubTab] = useState<AdminSubTab | null>(null);
+  
+  // Profile States
+  const [profileData, setProfileData] = useState({
+    name: user.name || '',
+    email: user.email || '',
+    phone: '',
+    bio: '',
+    avatar: ''
+  });
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
+  const [profileUploadLoading, setProfileUploadLoading] = useState(false);
+  const [teachers, setTeachers] = useState<Employee[]>([]);
+  const [allClasses, setAllClasses] = useState<Class[]>([]);
+  const [sections, setSections] = useState<Section[]>([]);
+  const [assignments, setAssignments] = useState<TeacherClassAssignment[]>([]);
+  const [myAssignedClasses, setMyAssignedClasses] = useState<Class[]>([]);
+  const [isCheckedIn, setIsCheckedIn] = useState(false);
+  const [todayAttendance, setTodayAttendance] = useState<TeacherAttendance | null>(null);
+  const [teacherLogs, setTeacherLogs] = useState<TeacherAttendance[]>([]);
+  const [selectedClassId, setSelectedClassId] = useState<number | null>(null);
+  const [selectedClassForDetail, setSelectedClassForDetail] = useState<Class | null>(null);
+  const [classStudents, setClassStudents] = useState<Student[]>([]);
+  const [classDetailStudents, setClassDetailStudents] = useState<Student[]>([]);
+  const [studentSearchQuery, setStudentSearchQuery] = useState('');
+  const [isSearchingStudents, setIsSearchingStudents] = useState(false);
+  const [searchResults, setSearchResults] = useState<Student[]>([]);
+  const [isAssigningTeacherModalOpen, setIsAssigningTeacherModalOpen] = useState(false);
+  const [classForNewAssignment, setClassForNewAssignment] = useState<Class | null>(null);
+  const [isDeleting, setIsDeleting] = useState<number | string | null>(null);
+  const [attendanceRecords, setAttendanceRecords] = useState<Record<number, 'Present' | 'Absent' | 'Sick' | 'Leave'>>({});
+  const [isSavingAttendance, setIsSavingAttendance] = useState(false);
+  const [reportDate, setReportDate] = useState(new Date().toISOString().split('T')[0]);
+  const [attendanceMode, setAttendanceMode] = useState<'mark' | 'report'>('mark');
+  const [showReport, setShowReport] = useState(false);
+  const [reportSubTab, setReportSubTab] = useState<'class-daily' | 'class-historical' | 'staff-logs' | 'personal'>('class-daily');
+  
+  // States for general class-wise reports
+  const [selectedReportClassId, setSelectedReportClassId] = useState<number | null>(null);
+  const [generalReportDate, setGeneralReportDate] = useState(new Date().toISOString().split('T')[0]);
+  const [historicalReportFilters, setHistoricalReportFilters] = useState({
+    classId: '',
+    startDate: new Date(new Date().setDate(new Date().getDate() - 30)).toISOString().split('T')[0],
+    endDate: new Date().toISOString().split('T')[0]
+  });
+  const [historicalReportData, setHistoricalReportData] = useState<any[]>([]);
+  const [isGeneratingHistorical, setIsGeneratingHistorical] = useState(false);
+  
+  const [reportData, setReportData] = useState<{
+    total: number;
+    boys: number;
+    girls: number;
+    present: number;
+    absent: number;
+    sick: number;
+    leave: number;
+    presentPercentage: string;
+    categorizedStudents: Record<'Present' | 'Absent' | 'Sick' | 'Leave', Student[]>;
+  } | null>(null);
+  const [viewingCategory, setViewingCategory] = useState<'Present' | 'Absent' | 'Sick' | 'Leave' | null>(null);
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc' | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [passwordForm, setPasswordForm] = useState({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: ''
+  });
+  const [isUpdatingPassword, setIsUpdatingPassword] = useState(false);
+  const [teacherFilter, setTeacherFilter] = useState<'all' | 'active' | 'inactive'>('all');
+  const [selectedTeacherId, setSelectedTeacherId] = useState<number | null>(null);
+
+  const [statsData, setStatsData] = useState<{name: string, attendance: number}[]>([]);
+  const [schoolName, setSchoolName] = useState<string>('');
+
+  const [teacherAttendanceLogs, setTeacherAttendanceLogs] = useState<TeacherAttendance[]>([]);
+  const [enrolmentLogs, setEnrolmentLogs] = useState<Student[]>([]);
+  const [showEnrolmentForm, setShowEnrolmentForm] = useState(false);
+  const [isEnrolling, setIsEnrolling] = useState(false);
+
+  // Calendar Helpers
+  const getDaysInMonth = (date: Date) => {
+    const year = date.getFullYear();
+    const month = date.getMonth();
+    const firstDay = new Date(year, month, 1).getDay();
+    const lastDate = new Date(year, month + 1, 0).getDate();
+    return { firstDay, lastDate };
+  };
+
+  const getCalendarDays = () => {
+    const { firstDay, lastDate } = getDaysInMonth(currentCalendarDate);
+    const days = [];
+    
+    // Fill empty days for previous month
+    for (let i = 0; i < firstDay; i++) {
+      days.push(null);
+    }
+    
+    // Fill current month days
+    for (let i = 1; i <= lastDate; i++) {
+      days.push(new Date(currentCalendarDate.getFullYear(), currentCalendarDate.getMonth(), i));
+    }
+    
+    return days;
+  };
+
+  const changeMonth = (offset: number) => {
+    const newDate = new Date(currentCalendarDate.getFullYear(), currentCalendarDate.getMonth() + offset, 1);
+    setCurrentCalendarDate(newDate);
+  };
+
+  // Calendar States
+  const [currentCalendarDate, setCurrentCalendarDate] = useState(new Date());
+  const [schoolEvents, setSchoolEvents] = useState<SchoolEvent[]>([
+    { id: 1, title: 'Term 1 Commencement', date: '2026-05-01', type: 'academic', color: 'emerald' },
+    { id: 2, title: 'Annual Sports Meet', date: '2026-05-15', type: 'event', color: 'blue' },
+    { id: 3, title: 'Staff Development Day', date: '2026-05-10', type: 'staff', color: 'amber' },
+    { id: 4, title: 'Mid-Term Examinations', date: '2026-05-20', type: 'exam', color: 'rose' },
+    { id: 5, title: 'Summer Vacations Start', date: '2026-06-01', type: 'holiday', color: 'indigo' },
+  ]);
+  const [selectedCalendarDay, setSelectedCalendarDay] = useState<Date | null>(new Date());
+
+  const [isEventModalOpen, setIsEventModalOpen] = useState(false);
+  const [editingEvent, setEditingEvent] = useState<SchoolEvent | null>(null);
+  const [isSavingEvent, setIsSavingEvent] = useState(false);
+  const [eventForm, setEventForm] = useState({
+    title: '',
+    date: new Date().toISOString().split('T')[0],
+    type: 'event' as 'academic' | 'event' | 'exam' | 'holiday' | 'staff',
+    description: ''
+  });
+
+  const [enrollForm, setEnrollForm] = useState({
+    name: '',
+    father_name: '',
+    admission_no: '',
+    gender: 'MALE',
+    dob: '',
+    father_cnic: '',
+    father_mobile: '',
+    class_id: '',
+    section_id: '',
+    previous_school_name: '',
+    previous_school_emis: '',
+    session: new Date().getFullYear().toString(),
+    enrollment_type: 'Fresh' as 'Public' | 'Private' | 'Dropout' | 'Fresh' | 'Other'
+  });
+  const [reportFilters, setReportFilters] = useState({
+    teacherId: '',
+    startDate: new Date().toISOString().split('T')[0],
+    endDate: new Date().toISOString().split('T')[0]
+  });
+  const [enrolmentFilters, setEnrolmentFilters] = useState({
+    classId: '',
+    type: '',
+    startDate: new Date().toISOString().split('T')[0],
+    endDate: new Date().toISOString().split('T')[0]
+  });
+  const [todaySummary, setTodaySummary] = useState({
+    total: 0,
+    present: 0,
+    absent: 0,
+    onClock: 0
+  });
+
+  const [allLeaveRequests, setAllLeaveRequests] = useState<LeaveRequest[]>([]);
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [semesters, setSemesters] = useState<Semester[]>([]);
+  const [subjects, setSubjects] = useState<Subject[]>([]);
+  const [classSubjects, setClassSubjects] = useState<ClassSubject[]>([]);
+  const [examResults, setExamResults] = useState<ExamResult[]>([]);
+  const [isAddingSubject, setIsAddingSubject] = useState(false);
+  const [examManagementMode, setExamManagementMode] = useState<'sessions' | 'semesters' | 'subjects' | 'assignment' | 'results'>('sessions');
+
+  const [sessionForm, setSessionForm] = useState({ name: '' });
+  const [semesterForm, setSemesterForm] = useState({ name: '' });
+  const [subjectForm, setSubjectForm] = useState({ name: '', code: '' });
+  const [classSubjectForm, setClassSubjectForm] = useState({ 
+    class_id: '', 
+    subject_id: '', 
+    teacher_id: '', 
+    total_marks: 100, 
+    passing_marks: 33 
+  });
+  const [leaveFilterStatus, setLeaveFilterStatus] = useState<'All' | 'Pending' | 'Approved' | 'Rejected'>('All');
+  const [isProcessingLeave, setIsProcessingLeave] = useState<number | null>(null);
+  const [showLeaveModal, setShowLeaveModal] = useState(false);
+  const [showLeaveConfirmModal, setShowLeaveConfirmModal] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [dataError, setDataError] = useState<string | null>(null);
+  const [leaveFormData, setLeaveFormData] = useState({
+    type: 'Casual Leave',
+    startDate: new Date().toISOString().split('T')[0],
+    endDate: new Date().toISOString().split('T')[0],
+    reason: '',
+    document: null as File | null
+  });
+  const [leaveDays, setLeaveDays] = useState(1);
+
+  const [confirmModal, setConfirmModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    onConfirm: () => void;
+    type: 'danger' | 'warning' | 'info';
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {},
+    type: 'danger',
+  });
+
+  const sortedStudents = useMemo(() => {
+    if (!sortDirection) return classStudents;
+    return [...classStudents].sort((a, b) => {
+      const numA = parseInt(a.admission_no || '0');
+      const numB = parseInt(b.admission_no || '0');
+      if (sortDirection === 'asc') return numA - numB;
+      return numB - numA;
+    });
+  }, [classStudents, sortDirection]);
+
+  const sortedExamResults = useMemo(() => {
+    if (!sortDirection) return examResults;
+    return [...examResults].sort((a, b) => {
+      const studentA = classStudents.find(s => s.id === a.student_id) || searchResults.find(s => s.id === a.student_id);
+      const studentB = classStudents.find(s => s.id === b.student_id) || searchResults.find(s => s.id === b.student_id);
+      const numA = parseInt(studentA?.admission_no || '0');
+      const numB = parseInt(studentB?.admission_no || '0');
+      if (sortDirection === 'asc') return numA - numB;
+      return numB - numA;
+    });
+  }, [examResults, sortDirection, searchResults, classStudents]);
+
+  const toggleSort = () => {
+    setSortDirection(prev => {
+      if (prev === null) return 'asc';
+      if (prev === 'asc') return 'desc';
+      return null;
+    });
+  };
+
+  const openConfirmModal = (title: string, message: string, onConfirm: () => void, type: 'danger' | 'warning' | 'info' = 'danger') => {
+    setConfirmModal({
+      isOpen: true,
+      title,
+      message,
+      onConfirm: () => {
+        onConfirm();
+        setConfirmModal(prev => ({ ...prev, isOpen: false }));
+      },
+      type,
+    });
+  };
+
+  const isSupabaseConfigured = !!(import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_URL !== 'undefined');
+
+  useEffect(() => {
+    fetchAdminData();
+    calculateStats();
+    fetchTodaySummary();
+    fetchAllLeaveRequests();
+    fetchEvents();
+  }, []);
+
+  useEffect(() => {
+    const start = new Date(leaveFormData.startDate);
+    const end = new Date(leaveFormData.endDate);
+    if (end >= start) {
+      const diffTime = Math.abs(end.getTime() - start.getTime());
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
+      setLeaveDays(diffDays);
+    } else {
+      setLeaveDays(0);
+    }
+  }, [leaveFormData.startDate, leaveFormData.endDate]);
+
+  const fetchAllLeaveRequests = async () => {
+    try {
+      if (!isSupabaseConfigured) {
+        setAllLeaveRequests([
+          { id: 1, teacher_id: 2, leave_type: 'Sick Leave', from_date: '2024-05-10', to_date: '2024-05-12', days: 3, reason: 'Flu symptoms', status: 'Pending', submitted_at: new Date().toISOString(), emis: user.emis } as any
+        ]);
+        return;
+      }
+      const { data, error } = await supabase
+        .from('leave_requests')
+        .select('*')
+        .eq('emis', user.emis)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      setAllLeaveRequests(data || []);
+    } catch (err) {
+      console.error('Error fetching all leave requests:', err);
+    }
+  };
+
+  const handleLeaveAction = async (requestId: number, newStatus: 'Approved' | 'Rejected') => {
+    setIsProcessingLeave(requestId);
+    try {
+      if (!isSupabaseConfigured) {
+        setAllLeaveRequests(prev => prev.map(req => req.id === requestId ? { ...req, status: newStatus } : req));
+        alert(`Request ${newStatus} successfully (Demo Mode).`);
+        return;
+      }
+
+      const { error } = await supabase
+        .from('leave_requests')
+        .update({ status: newStatus })
+        .eq('id', requestId);
+
+      if (error) throw error;
+
+      setAllLeaveRequests(prev => prev.map(req => req.id === requestId ? { ...req, status: newStatus } : req));
+      alert(`Request has been ${newStatus.toLowerCase()}.`);
+    } catch (err: any) {
+      alert(`Operation failed: ${err.message}`);
+    } finally {
+      setIsProcessingLeave(null);
+    }
+  };
+
+  const saveSession = async (e: FormEvent) => {
+    e.preventDefault();
+    try {
+      if (isSupabaseConfigured) {
+        const { data, error } = await supabase.from('sessions').insert([{ ...sessionForm, emis: user.emis }]).select();
+        if (error) throw error;
+        if (data) setSessions([...sessions, data[0]]);
+      } else {
+        setSessions([...sessions, { id: Date.now(), ...sessionForm, emis: user.emis }]);
+      }
+      setSessionForm({ name: '' });
+    } catch (err: any) { alert(err.message); }
+  };
+
+  const saveSemester = async (e: FormEvent) => {
+    e.preventDefault();
+    try {
+      if (isSupabaseConfigured) {
+        const { data, error } = await supabase.from('semesters').insert([{ ...semesterForm, emis: user.emis }]).select();
+        if (error) throw error;
+        if (data) setSemesters([...semesters, data[0]]);
+      } else {
+        setSemesters([...semesters, { id: Date.now(), ...semesterForm, emis: user.emis }]);
+      }
+      setSemesterForm({ name: '' });
+    } catch (err: any) { alert(err.message); }
+  };
+
+  const saveSubject = async (e: FormEvent) => {
+    e.preventDefault();
+    try {
+      if (isSupabaseConfigured) {
+        const { data, error } = await supabase.from('subjects').insert([{ ...subjectForm, emis: user.emis }]).select();
+        if (error) throw error;
+        if (data) setSubjects([...subjects, data[0]]);
+      } else {
+        setSubjects([...subjects, { id: Date.now(), ...subjectForm, emis: user.emis }]);
+      }
+      setSubjectForm({ name: '', code: '' });
+    } catch (err: any) { alert(err.message); }
+  };
+
+  const assignSubjectToClass = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!classSubjectForm.class_id || !classSubjectForm.subject_id) {
+        alert('Please select both class and subject');
+        return;
+    }
+    try {
+      // Find teacher assigned to this class from teacher assignments
+      const classAssignment = assignments.find(a => a.class_id === parseInt(classSubjectForm.class_id));
+      const foundTeacherId = classAssignment ? classAssignment.teacher_id : (allClasses.find(c => c.id === parseInt(classSubjectForm.class_id))?.teacher_id || null);
+
+      const payload = {
+        class_id: parseInt(classSubjectForm.class_id),
+        subject_id: parseInt(classSubjectForm.subject_id),
+        teacher_id: foundTeacherId,
+        total_marks: classSubjectForm.total_marks,
+        passing_marks: classSubjectForm.passing_marks,
+        emis: user.emis
+      };
+      if (isSupabaseConfigured) {
+        const { data, error } = await supabase.from('class_subject').insert([payload]).select();
+        if (error) throw error;
+        if (data) setClassSubjects([...classSubjects, data[0]]);
+      } else {
+        setClassSubjects([...classSubjects, { id: Date.now(), ...payload }]);
+      }
+      setClassSubjectForm({ class_id: '', subject_id: '', teacher_id: '', total_marks: 100, passing_marks: 33 });
+    } catch (err: any) { alert(err.message); }
+  };
+
+  const fetchTodaySummary = async () => {
+    if (!isSupabaseConfigured) {
+      setTodaySummary({
+        total: 12,
+        present: 10,
+        absent: 1,
+        onClock: 1
+      });
+      return;
+    }
+    try {
+      const today = new Date().toISOString().split('T')[0];
+      const { data: allTeachers } = await supabase.from('emp').select('id').eq('emis', user.emis);
+      const { data: attendance } = await supabase
+        .from('teacher_attendance')
+        .select('*')
+        .eq('attendance_date', today)
+        .eq('emis', user.emis);
+      
+      const total = allTeachers?.length || 0;
+      const present = attendance?.length || 0;
+      const onClock = attendance?.filter(a => !a.check_out).length || 0;
+      
+      setTodaySummary({
+        total,
+        present,
+        absent: total - present,
+        onClock
+      });
+    } catch (err) {
+      console.error('Error fetching today summary:', err);
+    }
+  };
+
+  const generateTeacherReport = async () => {
+    try {
+      let query = supabase
+        .from('teacher_attendance')
+        .select('*')
+        .eq('emis', user.emis)
+        .gte('attendance_date', reportFilters.startDate)
+        .lte('attendance_date', reportFilters.endDate);
+      
+      if (reportFilters.teacherId) {
+        query = query.eq('teacher_id', parseInt(reportFilters.teacherId));
+      }
+
+      const { data, error } = await query.order('attendance_date', { ascending: false });
+      if (error) throw error;
+      setTeacherAttendanceLogs(data || []);
+    } catch (err) {
+      console.error('Error generating teacher report:', err);
+    }
+  };
+
+  const fetchEnrolmentReport = async () => {
+    try {
+      if (!isSupabaseConfigured) {
+        setEnrolmentLogs([
+          { id: 1, name: 'Sample Student', class_id: 1, enrolment_type: 'Fresh', class_enrolment_date: enrolmentFilters.startDate, emis: user.emis } as any
+        ]);
+        return;
+      }
+      let query = supabase
+        .from('students')
+        .select('*')
+        .eq('emis', user.emis)
+        .gte('class_enrolment_date', enrolmentFilters.startDate)
+        .lte('class_enrolment_date', enrolmentFilters.endDate);
+      
+      if (enrolmentFilters.classId) {
+        query = query.eq('class_id', parseInt(enrolmentFilters.classId));
+      }
+      
+      if (enrolmentFilters.type) {
+        query = query.eq('enrollment_type', enrolmentFilters.type);
+      }
+
+      const { data, error } = await query.order('class_enrolment_date', { ascending: false });
+      if (error) throw error;
+      setEnrolmentLogs(data || []);
+    } catch (err: any) {
+      console.error('Error generating enrolment report:', err);
+    }
+  };
+
+  const handleEnrollStudent = async (e: FormEvent) => {
+    e.preventDefault();
+    setIsEnrolling(true);
+    try {
+      if (!isSupabaseConfigured) {
+        alert('Student enrolled successfully (Demo Mode)!');
+        const mockStudent: Student = {
+          id: Date.now(),
+          name: enrollForm.name,
+          father_name: enrollForm.father_name,
+          admission_no: enrollForm.admission_no,
+          gender: enrollForm.gender,
+          class_id: enrollForm.class_id ? parseInt(enrollForm.class_id) : null,
+          section_id: enrollForm.section_id ? parseInt(enrollForm.section_id) : null,
+          enrollment_type: enrollForm.enrollment_type,
+          class_enrolment_date: new Date().toISOString().split('T')[0],
+          emis: user.emis
+        } as any;
+        setEnrolmentLogs([mockStudent, ...enrolmentLogs]);
+        setShowEnrolmentForm(false);
+        setEnrollForm({
+          name: '', father_name: '', admission_no: '', gender: 'MALE', dob: '',
+          father_cnic: '', father_mobile: '', class_id: '', section_id: '',
+          previous_school_name: '', previous_school_emis: '', session: new Date().getFullYear().toString(),
+          enrollment_type: 'Fresh'
+        });
+        setIsEnrolling(false);
+        return;
+      }
+
+      const studentData = {
+        name: enrollForm.name,
+        father_name: enrollForm.father_name,
+        admission_no: enrollForm.admission_no,
+        class_id: enrollForm.class_id ? parseInt(enrollForm.class_id) : null,
+        section_id: enrollForm.section_id ? parseInt(enrollForm.section_id) : null,
+        enrollment_type: enrollForm.enrollment_type,
+        previous_school_name: (!['Fresh', 'Dropout'].includes(enrollForm.enrollment_type)) ? enrollForm.previous_school_name : null,
+        previous_school_emis: (!['Fresh', 'Dropout'].includes(enrollForm.enrollment_type)) ? enrollForm.previous_school_emis : null,
+        session: enrollForm.session,
+        gender: enrollForm.gender,
+        date_of_birth: enrollForm.dob,
+        father_cnic: enrollForm.father_cnic,
+        father_mobile_no: enrollForm.father_mobile,
+        class_enrolment_date: new Date().toISOString().split('T')[0],
+        class_status: 'Active',
+        student_status: 'Active',
+        emis: user.emis
+      };
+
+      const { data, error } = await supabase
+        .from('students')
+        .insert([studentData])
+        .select();
+
+      if (error) throw error;
+      
+      alert('Student enrolled successfully!');
+      if (data) setEnrolmentLogs([data[0], ...enrolmentLogs]);
+      setShowEnrolmentForm(false);
+      setEnrollForm({
+        name: '', father_name: '', admission_no: '', gender: 'MALE', dob: '',
+        father_cnic: '', father_mobile: '', class_id: '', section_id: '',
+        previous_school_name: '', previous_school_emis: '', session: new Date().getFullYear().toString(),
+        enrollment_type: 'Fresh'
+      });
+    } catch (err: any) {
+      console.error('Error enrolling student:', err);
+      alert(`Enrollment failed: ${err.message}`);
+    } finally {
+      setIsEnrolling(false);
+    }
+  };
+
+  const fetchEvents = async () => {
+    if (!isSupabaseConfigured) return;
+    try {
+      const { data, error } = await supabase
+        .from('school_events')
+        .select('*')
+        .eq('emis', user.emis);
+      if (error) throw error;
+      if (data) setSchoolEvents(data);
+    } catch (err) {
+      console.error('Error fetching events:', err);
+    }
+  };
+
+  const handleSaveEvent = async (e: FormEvent) => {
+    e.preventDefault();
+    setIsSavingEvent(true);
+    
+    const typeColors = {
+      academic: 'emerald',
+      event: 'blue',
+      exam: 'rose',
+      holiday: 'indigo',
+      staff: 'amber'
+    };
+
+    const payload = {
+      ...eventForm,
+      color: typeColors[eventForm.type],
+      emis: user.emis
+    };
+
+    try {
+      if (isSupabaseConfigured) {
+        if (editingEvent) {
+          const { error } = await supabase
+            .from('school_events')
+            .update(payload)
+            .eq('id', editingEvent.id);
+          if (error) throw error;
+        } else {
+          const { error } = await supabase
+            .from('school_events')
+            .insert([payload]);
+          if (error) throw error;
+        }
+        await fetchEvents();
+      } else {
+        // Demo mode
+        if (editingEvent) {
+          setSchoolEvents(prev => prev.map(ev => ev.id === editingEvent.id ? { ...ev, ...payload } : ev));
+        } else {
+          setSchoolEvents(prev => [...prev, { id: Date.now(), ...payload }]);
+        }
+      }
+      setIsEventModalOpen(false);
+      setEditingEvent(null);
+      setEventForm({
+        title: '',
+        date: new Date().toISOString().split('T')[0],
+        type: 'event',
+        description: ''
+      });
+    } catch (err: any) {
+      alert(`Failed to save event: ${err.message}`);
+    } finally {
+      setIsSavingEvent(false);
+    }
+  };
+
+  const handleDeleteEvent = async (id: number) => {
+    if (!confirm('Are you sure you want to delete this event?')) return;
+    
+    try {
+      if (isSupabaseConfigured) {
+        const { error } = await supabase
+          .from('school_events')
+          .delete()
+          .eq('id', id);
+        if (error) throw error;
+        await fetchEvents();
+      } else {
+        setSchoolEvents(prev => prev.filter(ev => ev.id !== id));
+      }
+    } catch (err: any) {
+      alert(`Failed to delete event: ${err.message}`);
+    }
+  };
+
+  const openEditEvent = (ev: SchoolEvent) => {
+    setEditingEvent(ev);
+    setEventForm({
+      title: ev.title,
+      date: ev.date,
+      type: ev.type,
+      description: ev.description || ''
+    });
+    setIsEventModalOpen(true);
+  };
+
+  const calculateStats = async () => {
+    try {
+      if (!isSupabaseConfigured) {
+        setStatsData([
+          { name: 'Grade 1', attendance: 94 },
+          { name: 'Grade 2', attendance: 88 },
+          { name: 'Grade 3', attendance: 92 },
+          { name: 'Grade 4', attendance: 85 },
+          { name: 'Grade 5', attendance: 90 }
+        ]);
+        return;
+      }
+      const { data: classes } = await supabase.from('classes').select('id, class_name').eq('emis', user.emis);
+      const today = new Date().toISOString().split('T')[0];
+      
+      const stats = await Promise.all((classes || []).map(async (cls) => {
+        const { data: attendance } = await supabase
+          .from('student_attendance')
+          .select('status')
+          .eq('class_id', cls.id)
+          .eq('date', today)
+          .eq('emis', user.emis);
+        
+        const total = attendance?.length || 0;
+        const present = attendance?.filter(a => a.status === 'Present').length || 0;
+        const percent = total > 0 ? Math.round((present / total) * 100) : 0;
+        
+        return { id: cls.id, name: cls.class_name, attendance: percent };
+      }));
+      
+      setStatsData(stats.length > 0 ? stats : [
+        { id: 'd1', name: 'Grade 10', attendance: 94 },
+        { id: 'd2', name: 'Grade 11', attendance: 88 }
+      ]);
+    } catch (err) {
+      console.error('Error calculating dashboard stats:', err);
+    }
+  };
+
+  const handlePasswordChange = async (e: any) => {
+    e.preventDefault();
+    if (passwordForm.newPassword !== passwordForm.confirmPassword) {
+      alert('New passwords do not match');
+      return;
+    }
+    if (passwordForm.newPassword.length < 6) {
+      alert('Password must be at least 6 characters');
+      return;
+    }
+
+    setIsUpdatingPassword(true);
+    try {
+      if (!isSupabaseConfigured) {
+        alert('Password updated successfully (Demo Mode)');
+        setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+        setIsUpdatingPassword(false);
+        return;
+      }
+
+      // Check current password
+      const { data: userData, error: userError } = await supabase
+        .from('emp')
+        .select('password')
+        .eq('id', user.id)
+        .single();
+
+      if (userError || !userData) throw new Error('User not found');
+
+      const isMatch = bcrypt.compareSync(passwordForm.currentPassword, userData.password);
+      if (!isMatch) {
+         alert('Current password incorrect');
+         return;
+      }
+
+      const hashedPassword = bcrypt.hashSync(passwordForm.newPassword, 10);
+      const { error } = await supabase
+        .from('emp')
+        .update({ password: hashedPassword })
+        .eq('id', user.id);
+
+      if (error) throw error;
+      
+      alert('Password updated successfully');
+      setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+    } catch (err: any) {
+      alert(`Update failed: ${err.message}`);
+    } finally {
+      setIsUpdatingPassword(false);
+    }
+  };
+
+  const fetchAdminData = async () => {
+    setIsLoading(true);
+    setDataError(null);
+    if (!isSupabaseConfigured) {
+      setTimeout(() => {
+        setSchoolName('Government Primary School (Demo)');
+        setTeachers([
+          { id: 1, name: 'Principal Admin', role: 'admin', designation: 'Principal', personnel: '654321', emis: user.emis },
+          { id: 2, name: 'Sarah Ahmed', role: 'teacher', designation: 'Teacher', personnel: '789012', emis: user.emis }
+        ] as any);
+        const today = new Date().toISOString().split('T')[0];
+        setTeacherAttendanceLogs([
+          { id: 101, emp_id: 2, status: 'Present', check_in: today + 'T08:00:00', emis: user.emis }
+        ] as any);
+        setTodaySummary({
+          total: 12,
+          present: 10,
+          absent: 1,
+          onClock: 1
+        });
+        setAllClasses([
+          { id: 1, name: 'Class 5', grade: '5', emis: user.emis },
+          { id: 2, name: 'Class 4', grade: '4', emis: user.emis }
+        ] as any);
+        setSections([
+          { id: 1, name: 'A', class_id: 1 },
+          { id: 2, name: 'B', class_id: 2 }
+        ] as any);
+        setMyAssignedClasses([
+          { id: 1, name: 'Class 5', grade: '5', emis: user.emis }
+        ] as any);
+        setIsLoading(false);
+      }, 800);
+      return;
+    }
+    try {
+      // Fetch school info
+      const { data: schoolData, error: schoolError } = await supabase
+        .from('schools')
+        .select('name')
+        .eq('emis', user.emis)
+        .single();
+      
+      if (schoolError && schoolError.code !== 'PGRST116') throw schoolError;
+      if (schoolData) {
+        setSchoolName(schoolData.name);
+      }
+
+      const today = new Date().toISOString().split('T')[0];
+      
+      // Fetch today's attendance for the admin/teacher
+      const { data: attendanceData, error: attErr } = await supabase
+        .from('teacher_attendance')
+        .select('*')
+        .eq('teacher_id', user.id)
+        .eq('attendance_date', today)
+        .eq('emis', user.emis)
+        .maybeSingle();
+
+      if (attErr) throw attErr;
+
+      if (attendanceData) {
+        setTodayAttendance(attendanceData);
+        setIsCheckedIn(!!attendanceData.check_in && !attendanceData.check_out);
+      } else {
+        setTodayAttendance(null);
+        setIsCheckedIn(false);
+      }
+
+      // Fetch historical logs
+      const { data: logsData, error: logsErr } = await supabase
+        .from('teacher_attendance')
+        .select('*')
+        .eq('teacher_id', user.id)
+        .eq('emis', user.emis)
+        .order('attendance_date', { ascending: false })
+        .limit(10);
+      
+      if (logsErr) throw logsErr;
+      if (logsData) setTeacherLogs(logsData);
+
+      const { data: empData, error: empErr } = await supabase.from('emp').select('*').eq('emis', user.emis);
+      if (empErr) throw empErr;
+      
+      const fetchedTeachers = (empData && empData.length > 0) ? empData : [
+        { 
+          id: 1, 
+          name: 'Zafar Ali', 
+          email: 'zafar@gps.com', 
+          cnic: '11111-1111111-1', 
+          role: 'teacher', 
+          designation: 'Senior Instructor',
+          username: 'zafar_ali',
+          password: bcrypt.hashSync('teacher', 10),
+          is_active: true,
+          must_change_password: false,
+          last_login: null,
+          reset_token: null,
+          token_expiry: null,
+          synced_at: null,
+          mobile: null,
+          whatsapp: null,
+          bps: '17',
+          tenure: 'Permanent',
+          personnel: '123456',
+          emis: '21122',
+          dob: '1985-01-01',
+          date_of_entry: '2010-01-01'
+        }
+      ] as Employee[];
+      
+      setTeachers(fetchedTeachers);
+
+      // Fetch assigned classes for current admin (if they are also a teacher)
+      const { data: myAssignments, error: mAssErr } = await supabase
+        .from('teacher_class_assignment')
+        .select('class_id')
+        .eq('teacher_id', user.id)
+        .eq('emis', user.emis);
+
+      if (mAssErr) throw mAssErr;
+
+      const { data: classData, error: classErr } = await supabase.from('classes').select('*').eq('emis', user.emis);
+      if (classErr) throw classErr;
+
+      const { data: sectionData, error: sectErr } = await supabase.from('sections').select('*').eq('emis', user.emis);
+      if (sectErr) throw sectErr;
+      
+      if (sectionData) setSections(sectionData);
+      else setSections([
+        { id: 1, section_name: 'A' },
+        { id: 2, section_name: 'B' }
+      ] as Section[]);
+
+      if (classData) {
+        setAllClasses(classData);
+        if (myAssignments && myAssignments.length > 0) {
+          const myClassIds = myAssignments.map(a => a.class_id);
+          setMyAssignedClasses(classData.filter(c => myClassIds.includes(c.id)));
+        } else {
+          // Fallback for demo if admin has id 1
+          if (!import.meta.env.VITE_SUPABASE_URL && user.id === 1) {
+            setMyAssignedClasses(classData.filter(c => c.id === 1 || c.id === 2));
+          }
+        }
+      } else {
+        const demoClasses = [
+          { id: 1, class_name: 'Biology Dept', section_id: 1, academic_year: '2024', room_no: 'R1', subject: 'Biology', teacher_id: 1 },
+          { id: 2, class_name: 'Computer Lab 1', section_id: 2, academic_year: '2024', room_no: 'L1', subject: 'Computer', teacher_id: 1 },
+          { id: 3, class_name: 'General Science', section_id: 1, academic_year: '2024', room_no: 'R2', subject: 'Science', teacher_id: 1 }
+        ] as Class[];
+        setAllClasses(demoClasses);
+        if (user.id === 1) setMyAssignedClasses(demoClasses.filter(c => c.id === 1 || c.id === 2));
+      }
+
+      const { data: assignmentData, error: assErr } = await supabase.from('teacher_class_assignment').select('*').eq('emis', user.emis);
+      if (assErr) throw assErr;
+
+      if (assignmentData) setAssignments(assignmentData);
+      else setAssignments([
+        { id: 1, teacher_id: 1, class_id: 1, section_id: 1, period: '1st', from_date: '2024-01-01', to_date: '2024-12-31', emis: user.emis }
+      ] as TeacherClassAssignment[]);
+
+      // Fetch Exam Related Data
+      const { data: sessionData, error: sessErr } = await supabase.from('sessions').select('*').eq('emis', user.emis);
+      if (!sessErr && sessionData) setSessions(sessionData);
+      else if (!isSupabaseConfigured) setSessions([{ id: 1, name: '2023-24', emis: user.emis }, { id: 2, name: '2024-25', emis: user.emis }]);
+
+      const { data: semesterData, error: semErr } = await supabase.from('semesters').select('*').eq('emis', user.emis);
+      if (!semErr && semesterData) setSemesters(semesterData);
+      else if (!isSupabaseConfigured) setSemesters([{ id: 1, name: 'Mid Term', emis: user.emis }, { id: 2, name: 'Final Term', emis: user.emis }]);
+
+      const { data: subjectData, error: subjErr } = await supabase.from('subjects').select('*').eq('emis', user.emis);
+      if (!subjErr && subjectData) setSubjects(subjectData);
+      else if (!isSupabaseConfigured) setSubjects([{ id: 1, name: 'Mathematics', code: 'MATH101', emis: user.emis }, { id: 2, name: 'Physics', code: 'PHY101', emis: user.emis }]);
+
+      const { data: csData, error: csErr } = await supabase.from('class_subject').select('*').eq('emis', user.emis);
+      if (!csErr && csData) setClassSubjects(csData);
+      else if (!isSupabaseConfigured) setClassSubjects([{ id: 1, class_id: 1, subject_id: 1, teacher_id: 1, total_marks: 100, passing_marks: 33, emis: user.emis }]);
+
+      const { data: resData, error: resErr } = await supabase.from('exam_results').select('*').eq('emis', user.emis);
+      if (!resErr && resData) setExamResults(resData);
+      else if (!isSupabaseConfigured) setExamResults([]);
+
+    } catch (err: any) {
+      console.error('Error fetching admin data:', err);
+      setDataError(err.message || 'Critical system failure during data retrieval.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const fetchStudents = async (classId: number) => {
+    const { data } = await supabase
+      .from('students')
+      .select('*')
+      .eq('class_id', classId)
+      .eq('emis', user.emis);
+    
+    let students: Student[] = [];
+    if (data) {
+      students = data;
+    } else {
+      students = [
+        { id: 1, name: 'Abbas Khan', admission_no: '1001', class_id: classId, class_status: 'Active', student_status: 'Active' },
+        { id: 2, name: 'Zainab Bibi', admission_no: '1002', class_id: classId, class_status: 'Active', student_status: 'Active' },
+        { id: 3, name: 'Umar Hayat', admission_no: '1003', class_id: classId, class_status: 'Active', student_status: 'Active' },
+      ] as Student[];
+    }
+    setClassStudents(students);
+    
+    const initialAttendance: Record<number, 'Present' | 'Absent' | 'Sick' | 'Leave'> = {};
+    students.forEach(s => {
+      initialAttendance[s.id] = 'Present';
+    });
+    setAttendanceRecords(initialAttendance);
+  };
+
+  const updateAttendanceStatus = (studentId: number, status: 'Present' | 'Absent' | 'Sick' | 'Leave') => {
+    setAttendanceRecords(prev => ({
+      ...prev,
+      [studentId]: status
+    }));
+  };
+
+  const saveAttendance = async () => {
+    if (!selectedClassId) return;
+    
+    setIsSavingAttendance(true);
+    try {
+      // Check for session to satisfy RLS
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session && import.meta.env.VITE_SUPABASE_URL) {
+        console.warn('Authentication session missing. Proceeding with caution.');
+      }
+
+      const selectedClass = myAssignedClasses.find(c => c.id === selectedClassId);
+      const date = new Date().toISOString().split('T')[0];
+      const records = classStudents.map(student => ({
+        student_id: student.id,
+        class_id: selectedClassId,
+        section_id: selectedClass?.section_id || null,
+        date: date,
+        status: attendanceRecords[student.id] || 'Present',
+        teacher_id: user.id,
+        emis: user.emis
+      }));
+
+      const { error } = await supabase
+        .from('student_attendance')
+        .upsert(records);
+
+      if (error) throw error;
+
+      // Calculate report data
+      const total = classStudents.length;
+      const boys = classStudents.filter(s => s.gender === 'MALE').length;
+      const girls = classStudents.filter(s => s.gender === 'FEMALE').length;
+      
+      const counts = {
+        Present: 0,
+        Absent: 0,
+        Sick: 0,
+        Leave: 0
+      };
+      
+      const categorized: Record<'Present' | 'Absent' | 'Sick' | 'Leave', Student[]> = {
+        Present: [],
+        Absent: [],
+        Sick: [],
+        Leave: []
+      };
+
+      classStudents.forEach(student => {
+        const status = attendanceRecords[student.id] || 'Present';
+        counts[status]++;
+        categorized[status].push(student);
+      });
+
+      const presentPercentage = total > 0 ? ((counts.Present / total) * 100).toFixed(1) : '0';
+
+      setReportData({
+        total,
+        boys,
+        girls,
+        present: counts.Present,
+        absent: counts.Absent,
+        sick: counts.Sick,
+        leave: counts.Leave,
+        presentPercentage,
+        categorizedStudents: categorized
+      });
+      setShowReport(true);
+      
+      // Removed alert
+      // setSelectedClassId(null);
+    } catch (err) {
+      console.error('Error saving attendance:', err);
+      if (!import.meta.env.VITE_SUPABASE_URL) {
+        // Mock success logic
+        const total = classStudents.length;
+        const boys = classStudents.filter(s => s.gender === 'MALE').length;
+        const girls = classStudents.filter(s => s.gender === 'FEMALE').length;
+        const counts = { Present: 0, Absent: 0, Sick: 0, Leave: 0 };
+        const categorized: Record<'Present' | 'Absent' | 'Sick' | 'Leave', Student[]> = { Present: [], Absent: [], Sick: [], Leave: [] };
+        classStudents.forEach(s => {
+          const status = attendanceRecords[s.id] || 'Present';
+          counts[status]++;
+          categorized[status].push(s);
+        });
+        setReportData({
+          total, boys, girls, present: counts.Present, absent: counts.Absent, sick: counts.Sick, leave: counts.Leave,
+          presentPercentage: total > 0 ? ((counts.Present / total) * 100).toFixed(1) : '0',
+          categorizedStudents: categorized
+        });
+        setShowReport(true);
+      }
+    } finally {
+      setIsSavingAttendance(false);
+    }
+  };
+
+  const handleClassSelectForAttendance = (classId: number) => {
+    setSelectedClassId(classId);
+    setAttendanceMode('mark');
+    setShowReport(false);
+    fetchStudents(classId);
+    setActiveTab('my-attendance');
+  };
+
+  const handleViewClassDetail = async (cls: Class) => {
+    setSelectedClassForDetail(cls);
+    setStudentSearchQuery('');
+    setSearchResults([]);
+    try {
+      const { data, error } = await supabase
+        .from('students')
+        .select('*')
+        .eq('class_id', cls.id)
+        .eq('emis', user.emis);
+      
+      if (error) throw error;
+      
+      if (data) {
+        setClassDetailStudents(data);
+      } else if (!isSupabaseConfigured) {
+        // Mock data for demo
+        setClassDetailStudents([
+          { id: 1, name: 'Ahmad Raza', admission_no: 'ADM-2024-001', gender: 'MALE', student_status: 'Active' },
+          { id: 2, name: 'Saira Bano', admission_no: 'ADM-2024-002', gender: 'FEMALE', student_status: 'Active' },
+          { id: 3, name: 'Bilal Ahmed', admission_no: 'ADM-2024-003', gender: 'MALE', student_status: 'Active' },
+        ] as any);
+      }
+    } catch (err) {
+      console.error('Error fetching class detail students:', err);
+    }
+  };
+
+  const handleSearchStudents = async (query: string) => {
+    setStudentSearchQuery(query);
+    if (query.length < 2) {
+      setSearchResults([]);
+      return;
+    }
+    
+    setIsSearchingStudents(true);
+    try {
+      if (import.meta.env.VITE_SUPABASE_URL) {
+        const { data, error } = await supabase
+          .from('students')
+          .select('*')
+          .eq('emis', user.emis)
+          .or(`name.ilike.%${query}%,admission_no.ilike.%${query}%`)
+          .limit(5);
+        if (error) throw error;
+        setSearchResults(data || []);
+      } else {
+        setSearchResults([
+          { id: 99, name: 'Search Student 1', admission_no: 'S101', class_id: null },
+          { id: 100, name: 'Search Student 2', admission_no: 'S102', class_id: null }
+        ] as Student[]);
+      }
+    } catch (err) {
+      console.error('Search failed:', err);
+    } finally {
+      setIsSearchingStudents(false);
+    }
+  };
+
+  const handleAddStudentToClass = async (student: Student) => {
+    if (!selectedClassForDetail) return;
+    
+    try {
+      if (import.meta.env.VITE_SUPABASE_URL) {
+        const { error } = await supabase
+          .from('students')
+          .update({ class_id: selectedClassForDetail.id })
+          .eq('id', student.id);
+        if (error) throw error;
+      }
+      
+      setClassDetailStudents(prev => {
+        if (prev.some(s => s.id === student.id)) return prev;
+        return [...prev, { ...student, class_id: selectedClassForDetail.id }];
+      });
+      setSearchResults(prev => prev.filter(s => s.id !== student.id));
+      alert(`${student.name} added to ${selectedClassForDetail.class_name}`);
+    } catch (err: any) {
+      alert(`Add failed: ${err.message}`);
+    }
+  };
+
+  const handleRemoveStudentFromClass = async (studentId: number | string) => {
+    if (!studentId) {
+      alert('Error: Invalid Student ID');
+      return;
+    }
+    
+    openConfirmModal(
+      'Confirm Removal',
+      'Are you sure you want to remove this student from this class?',
+      async () => {
+        setIsDeleting(studentId);
+        try {
+          if (!isSupabaseConfigured) {
+            setClassDetailStudents(prev => prev.filter(s => s.id != studentId));
+            alert('Student removed from class successfully (Demo Mode).');
+            setIsDeleting(null);
+            return;
+          }
+
+          const { error } = await supabase
+            .from('students')
+            .update({ class_id: null, section_id: null })
+            .eq('id', studentId);
+          if (error) throw error;
+          
+          // Update local state
+          setClassDetailStudents(prev => prev.filter(s => s.id != studentId));
+          alert('Student removed from class successfully.');
+        } catch (err: any) {
+          console.error('Removal failed:', err);
+          alert(`Operation failed: ${err.message}`);
+        } finally {
+          setIsDeleting(null);
+        }
+      }
+    );
+  };
+
+  const handleDeleteStudent = async (studentId: number | string) => {
+    if (!studentId) {
+      alert('Error: Invalid Student ID');
+      return;
+    }
+    const idToUse = typeof studentId === 'string' ? parseInt(studentId) : studentId;
+    
+    openConfirmModal(
+      'Permanent Deletion',
+      'WARNING: This will permanently delete the student enrolment record. Project metrics will be affected. Proceed?',
+      async () => {
+        setIsDeleting(studentId);
+        try {
+          if (import.meta.env.VITE_SUPABASE_URL) {
+            // First delete related attendance records
+            const { error: attError } = await supabase.from('student_attendance').delete().eq('student_id', idToUse);
+            if (attError) {
+              console.warn('Attendance cleanup error:', attError);
+              // Continue anyway, might be no attendance or managed by constraints
+            }
+            
+            const { error: studentError } = await supabase
+              .from('students')
+              .delete()
+              .eq('id', idToUse);
+            
+            if (studentError) {
+              if (studentError.code === '23503') { // Foreign key violation
+                throw new Error('This student has related records (attendance or other) that could not be automatically cleared. Please contact support.');
+              }
+              throw studentError;
+            }
+          }
+          
+          // Update local states
+          setClassDetailStudents(prev => prev.filter(s => s.id != idToUse));
+          setEnrolmentLogs(prev => prev.filter(s => s.id != idToUse));
+          alert('Enrolment record deleted successfully.');
+        } catch (err: any) {
+          console.error('Deletion failed:', err);
+          alert(`Deletion failed: ${err.message || 'Unknown database error'}`);
+        } finally {
+          setIsDeleting(null);
+        }
+      }
+    );
+  };
+
+  const handleUnassignTeacher = async (assignmentId: number | string) => {
+    openConfirmModal(
+      'Revoke Assignment',
+      'Are you sure you want to unassign this teacher from this class/section?',
+      async () => {
+        try {
+          if (import.meta.env.VITE_SUPABASE_URL) {
+            const { error } = await supabase
+              .from('teacher_class_assignment')
+              .delete()
+              .eq('id', assignmentId);
+            if (error) throw error;
+          }
+          setAssignments(prev => prev.filter(a => a.id !== assignmentId));
+          alert('Teacher unassigned successfully.');
+        } catch (err: any) {
+          alert(`Unassign failed: ${err.message}`);
+        }
+      }
+    );
+  };
+
+  const handleDeleteTeacher = async (teacherId: number | string) => {
+    if (!teacherId || teacherId === user.id) {
+      alert('Cannot delete yourself or invalid ID');
+      return;
+    }
+    
+    openConfirmModal(
+      'Purge Teacher Account',
+      'Are you sure you want to delete this teacher? This will unassign all their classes.',
+      async () => {
+        setIsDeleting(teacherId);
+        try {
+          if (import.meta.env.VITE_SUPABASE_URL) {
+            // Cleanup teacher-related data
+            await supabase.from('teacher_attendance').delete().eq('teacher_id', teacherId);
+            await supabase.from('leave_requests').delete().eq('teacher_id', teacherId);
+            await supabase.from('teacher_class_assignment').delete().eq('teacher_id', teacherId);
+            // Reset class teacher_id
+            await supabase.from('classes').update({ teacher_id: null }).eq('teacher_id', teacherId);
+
+            const { error } = await supabase
+              .from('emp')
+              .delete()
+              .eq('id', teacherId);
+            
+            if (error) throw error;
+          }
+
+          setTeachers(prev => prev.filter(t => t.id != teacherId));
+          setSelectedTeacherId(null);
+          alert('Teacher account and all associated data purged successfully.');
+        } catch (err: any) {
+          alert(`Teacher deletion failed: ${err.message}`);
+        } finally {
+          setIsDeleting(null);
+        }
+      }
+    );
+  };
+
+  const handleDeleteClass = async (classId: number | string) => {
+    if (!classId) return;
+    
+    openConfirmModal(
+      'Delete Class',
+      'Permanently delete this class? This will unassign students but not delete them.',
+      async () => {
+        setIsDeleting(classId);
+        try {
+          if (!isSupabaseConfigured) {
+            setAllClasses(prev => prev.filter(c => c.id != classId));
+            alert('Class purged successfully (Demo Mode).');
+            setIsDeleting(null);
+            return;
+          }
+
+          if (import.meta.env.VITE_SUPABASE_URL) {
+            // Cleanup class-related data
+            await supabase.from('student_attendance').delete().eq('class_id', classId);
+            await supabase.from('teacher_class_assignment').delete().eq('class_id', classId);
+            // Unassign students from this class
+            await supabase.from('students').update({ class_id: null, section_id: null }).eq('class_id', classId);
+
+            const { error } = await supabase
+              .from('classes')
+              .delete()
+              .eq('id', classId);
+            
+            if (error) throw error;
+          }
+
+          setAllClasses(prev => prev.filter(c => c.id != classId));
+          alert('Class purged successfully. Students have been unassigned.');
+        } catch (err: any) {
+          alert(`Class deletion failed: ${err.message}`);
+        } finally {
+          setIsDeleting(null);
+        }
+      }
+    );
+  };
+
+  const fetchAttendanceForDate = async (classId: number, date: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('student_attendance')
+        .select('*')
+        .eq('class_id', classId)
+        .eq('date', date)
+        .eq('emis', user.emis);
+
+      if (error) throw error;
+
+      if (data && data.length > 0) {
+        // Calculate report from fetched data
+        const total = classStudents.length;
+        const boys = classStudents.filter(s => s.gender === 'MALE').length;
+        const girls = classStudents.filter(s => s.gender === 'FEMALE').length;
+        
+        const counts = { Present: 0, Absent: 0, Sick: 0, Leave: 0 };
+        const categorized: Record<'Present' | 'Absent' | 'Sick' | 'Leave', Student[]> = {
+          Present: [], Absent: [], Sick: [], Leave: []
+        };
+
+        classStudents.forEach(student => {
+          const record = data.find(r => r.student_id === student.id);
+          const status = (record?.status as any) || 'Present';
+          if (counts[status] !== undefined) counts[status]++;
+          categorized[status].push(student);
+        });
+
+        setReportData({
+          total, boys, girls,
+          present: counts.Present,
+          absent: counts.Absent,
+          sick: counts.Sick,
+          leave: counts.Leave,
+          presentPercentage: total > 0 ? ((counts.Present / total) * 100).toFixed(1) : '0',
+          categorizedStudents: categorized
+        });
+        setShowReport(true);
+      } else {
+        setShowReport(false);
+        setReportData(null);
+      }
+    } catch (err) {
+      console.error('Error fetching historical report:', err);
+    }
+  };
+
+  const fetchGeneralClassReport = async (classId: number, date: string) => {
+    try {
+      // First fetch students for this class if not already loaded or different class
+      const { data: studentsData } = await supabase
+        .from('students')
+        .select('*')
+        .eq('class_id', classId)
+        .eq('emis', user.emis);
+      
+      const students = studentsData || [];
+
+      const { data: attendanceData, error } = await supabase
+        .from('student_attendance')
+        .select('*')
+        .eq('class_id', classId)
+        .eq('date', date)
+        .eq('emis', user.emis);
+
+      if (error) throw error;
+
+      if (attendanceData && attendanceData.length > 0) {
+        const total = students.length;
+        const boys = students.filter(s => s.gender === 'MALE').length;
+        const girls = students.filter(s => s.gender === 'FEMALE').length;
+        
+        const counts = { Present: 0, Absent: 0, Sick: 0, Leave: 0 };
+        const categorized: Record<'Present' | 'Absent' | 'Sick' | 'Leave', Student[]> = {
+          Present: [], Absent: [], Sick: [], Leave: []
+        };
+
+        students.forEach(student => {
+          const record = attendanceData.find(r => r.student_id === student.id);
+          const status = (record?.status as any) || 'Present';
+          if (counts[status] !== undefined) counts[status]++;
+          categorized[status].push(student);
+        });
+
+        setReportData({
+          total, boys, girls,
+          present: counts.Present,
+          absent: counts.Absent,
+          sick: counts.Sick,
+          leave: counts.Leave,
+          presentPercentage: total > 0 ? ((counts.Present / total) * 100).toFixed(1) : '0',
+          categorizedStudents: categorized
+        });
+        setShowReport(true);
+      } else {
+        setShowReport(false);
+        setReportData(null);
+      }
+    } catch (err) {
+      console.error('Error fetching general report:', err);
+      if (!import.meta.env.VITE_SUPABASE_URL) {
+        setShowReport(false);
+        setReportData(null);
+      }
+    }
+  };
+
+  const generateHistoricalClassReport = async () => {
+    if (!historicalReportFilters.classId) {
+      alert('Please select a class');
+      return;
+    }
+    setIsGeneratingHistorical(true);
+    try {
+      if (!isSupabaseConfigured) {
+        setHistoricalReportData([
+          { id: 1, name: 'Student 1', presents: 20, absents: 2, leave: 1, percentage: '87.0' },
+          { id: 2, name: 'Student 2', presents: 18, absents: 4, leave: 1, percentage: '78.3' }
+        ]);
+        return;
+      }
+
+      // Fetch all students in the class
+      const { data: students } = await supabase
+        .from('students')
+        .select('id, name, admission_no')
+        .eq('class_id', parseInt(historicalReportFilters.classId))
+        .eq('emis', user.emis);
+
+      if (!students) {
+        setHistoricalReportData([]);
+        return;
+      }
+
+      // Fetch attendance records for the class in date range
+      const { data: attendance } = await supabase
+        .from('student_attendance')
+        .select('*')
+        .eq('class_id', parseInt(historicalReportFilters.classId))
+        .gte('date', historicalReportFilters.startDate)
+        .lte('date', historicalReportFilters.endDate)
+        .eq('emis', user.emis);
+
+      const report = students.map(student => {
+        const studentAttendance = attendance?.filter(a => a.student_id === student.id) || [];
+        const totalDays = studentAttendance.length;
+        const presents = studentAttendance.filter(a => a.status === 'Present').length;
+        const absents = studentAttendance.filter(a => a.status === 'Absent').length;
+        const sick = studentAttendance.filter(a => a.status === 'Sick').length;
+        const leave = studentAttendance.filter(a => a.status === 'Leave').length;
+
+        return {
+          id: student.id,
+          name: student.name,
+          admission_no: student.admission_no,
+          presents,
+          absents,
+          sick,
+          leave,
+          total: totalDays,
+          percentage: totalDays > 0 ? ((presents / totalDays) * 100).toFixed(1) : '0.0'
+        };
+      });
+
+      setHistoricalReportData(report);
+    } catch (err: any) {
+      alert(`Error generating report: ${err.message}`);
+    } finally {
+      setIsGeneratingHistorical(false);
+    }
+  };
+
+  const handlePunch = async () => {
+    const now = new Date();
+    const today = now.toISOString().split('T')[0];
+    const time = now.toTimeString().split(' ')[0]; // HH:mm:ss
+
+    // Check for session to satisfy RLS
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session && import.meta.env.VITE_SUPABASE_URL) {
+      console.warn('No active Supabase session found. Attendance punch might fail RLS check.');
+    }
+
+    if (!isCheckedIn) {
+      // Punch In
+      try {
+        const { data, error } = await supabase
+          .from('teacher_attendance')
+          .insert({
+            id: Math.floor(Math.random() * 2147483647),
+            teacher_id: user.id,
+            attendance_date: today,
+            check_in: time,
+            status: 'Present',
+            emis: user.emis
+          })
+          .select()
+          .single();
+
+        if (error) throw error;
+        if (data) {
+          setTodayAttendance(data);
+          setIsCheckedIn(true);
+          setTeacherLogs(prev => [data, ...prev.filter(l => l.id !== data.id)].slice(0, 10));
+        }
+      } catch (err) {
+        console.error('Error punching in:', err);
+        // Fallback for mock environment
+        if (!import.meta.env.VITE_SUPABASE_URL) {
+          const mockData: TeacherAttendance = {
+            id: Date.now(),
+            teacher_id: user.id,
+            attendance_date: today,
+            check_in: time,
+            check_out: null,
+            duration: null,
+            duration_seconds: null,
+            status: 'Present',
+            emis: user.emis
+          };
+          setTodayAttendance(mockData);
+          setIsCheckedIn(true);
+        }
+      }
+    } else if (todayAttendance) {
+      // Punch Out
+      try {
+        const checkInTimeParts = todayAttendance.check_in?.split(':') || ['08', '00', '00'];
+        const checkInTime = new Date();
+        checkInTime.setHours(parseInt(checkInTimeParts[0]), parseInt(checkInTimeParts[1]), parseInt(checkInTimeParts[2]));
+        
+        const diffMs = now.getTime() - checkInTime.getTime();
+        const diffSecs = Math.floor(diffMs / 1000);
+        
+        const hours = Math.floor(diffSecs / 3600);
+        const minutes = Math.floor((diffSecs % 3600) / 60);
+        const durationStr = `${hours}h ${minutes}m`;
+
+        const { data, error } = await supabase
+          .from('teacher_attendance')
+          .update({
+            check_out: time,
+            duration: durationStr,
+            duration_seconds: diffSecs
+          })
+          .eq('id', todayAttendance.id)
+          .select()
+          .single();
+
+        if (error) throw error;
+        if (data) {
+          setTodayAttendance(data);
+          setIsCheckedIn(false);
+          setTeacherLogs(prev => [data, ...prev.filter(l => l.id !== data.id)].slice(0, 10));
+        }
+      } catch (err) {
+        console.error('Error punching out:', err);
+        if (!import.meta.env.VITE_SUPABASE_URL) {
+          const updated = {
+            ...todayAttendance,
+            check_out: time,
+            duration: '8h 0m',
+            duration_seconds: 28800
+          } as TeacherAttendance;
+          setTodayAttendance(updated);
+          setIsCheckedIn(false);
+        }
+      }
+    }
+  };
+
+  const [selectedSessionId, setSelectedSessionId] = useState<string>('');
+  const [selectedSemesterId, setSelectedSemesterId] = useState<string>('');
+  const [selectedClassSubjectId, setSelectedClassSubjectId] = useState<string>('');
+  const [marksEntryData, setMarksEntryData] = useState<Record<number, number>>({});
+  const [isSavingMarks, setIsSavingMarks] = useState(false);
+
+  const saveMarks = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!selectedSessionId || !selectedSemesterId || !selectedClassSubjectId) {
+      alert('Please select session, semester and subject');
+      return;
+    }
+    const classSub = classSubjects.find(cs => cs.id === parseInt(selectedClassSubjectId));
+    if (!classSub) return;
+
+    setIsSavingMarks(true);
+    try {
+      const resultsToSave = Object.entries(marksEntryData).map(([studentId, marks]) => ({
+        student_id: parseInt(studentId),
+        class_id: classSub.class_id,
+        subject_id: classSub.subject_id,
+        session_id: parseInt(selectedSessionId),
+        semester_id: parseInt(selectedSemesterId),
+        obtained_marks: marks as number,
+        total_marks: classSub.total_marks,
+        passing_marks: classSub.passing_marks,
+        teacher_id: user.id,
+        emis: user.emis,
+        grade: (marks as number) >= (classSub.total_marks * 0.9) ? 'A+' : (marks as number) >= (classSub.total_marks * 0.8) ? 'A' : (marks as number) >= (classSub.total_marks * 0.7) ? 'B' : (marks as number) >= (classSub.total_marks * 0.6) ? 'C' : (marks as number) >= classSub.passing_marks ? 'D' : 'F'
+      }));
+
+      if (isSupabaseConfigured) {
+        const { error } = await supabase.from('exam_results').upsert(resultsToSave, { onConflict: 'student_id,class_id,subject_id,session_id,semester_id' });
+        if (error) throw error;
+      }
+      
+      setExamResults(prev => {
+          const filtered = prev.filter(r => 
+              !(resultsToSave.some(nr => 
+                  nr.student_id === r.student_id && 
+                  nr.class_id === r.class_id && 
+                  nr.subject_id === r.subject_id && 
+                  nr.session_id === r.session_id && 
+                  nr.semester_id === r.semester_id
+              ))
+          );
+          return [...filtered, ...resultsToSave as any];
+      });
+
+      alert('Marks saved successfully');
+    } catch (err: any) {
+      alert(`Saving marks failed: ${err.message}`);
+    } finally {
+      setIsSavingMarks(false);
+    }
+  };
+
+  const handleSubjectChange = async (subjectId: string) => {
+    setSelectedClassSubjectId(subjectId);
+    if (!subjectId) return;
+    
+    const classSub = classSubjects.find(cs => cs.id === parseInt(subjectId));
+    if (!classSub) return;
+    
+    // Fetch students of that class to enter marks
+    await fetchStudents(classSub.class_id);
+    
+    // Pre-fill with existing marks if any
+    if (selectedSessionId && selectedSemesterId) {
+      const existingMarks: Record<number, number> = {};
+      examResults.forEach(res => {
+        if (res.class_id === classSub.class_id && 
+            res.subject_id === classSub.subject_id && 
+            res.session_id === parseInt(selectedSessionId) && 
+            res.semester_id === parseInt(selectedSemesterId)) {
+          existingMarks[res.student_id] = res.obtained_marks;
+        }
+      });
+      setMarksEntryData(existingMarks);
+    }
+  };
+
+  const tabs = [
+    { id: 'home', label: 'Dashboard', icon: Shield },
+    { 
+      id: 'classes', 
+      label: 'Class', 
+      icon: Users,
+      subTabs: [
+        { id: 'class-attendance', label: 'Attendance Manage', icon: ClipboardList },
+        { id: 'class-manage', label: 'Manage (Students)', icon: UserPlus },
+      ]
+    },
+    { 
+      id: 'exams', 
+      label: 'Exam', 
+      icon: Award,
+      subTabs: [
+        { id: 'exam-results', label: 'Result Award List', icon: Star },
+        { id: 'exam-marking', label: 'Marking', icon: CheckCircle },
+      ]
+    },
+    { 
+      id: 'requests', 
+      label: 'Requests', 
+      icon: Bell,
+      subTabs: [
+        { id: 'req-leave', label: 'Leave', icon: ClipboardList },
+        { id: 'req-training', label: 'Training', icon: BookOpen },
+      ]
+    },
+    { 
+      id: 'reports', 
+      label: 'Report', 
+      icon: BarChart3,
+      subTabs: [
+        { id: 'report-student', label: 'Student att rep', icon: FileText },
+        { id: 'report-personal', label: 'My attendance report', icon: History },
+      ]
+    },
+    { 
+      id: 'teachers', 
+      label: 'Staff Hub', 
+      icon: UserCheck,
+      subTabs: [
+        { id: 'staff-list', label: 'Staff List', icon: Users },
+        { id: 'staff-add', label: 'Add Staff', icon: UserPlus },
+      ]
+    },
+    { id: 'calendar', label: 'Timeline', icon: Calendar },
+    { id: 'profile', label: 'Profile', icon: User },
+    { id: 'settings', label: 'System', icon: Settings },
+  ];
+
+  const handleTabClick = (tabId: AdminTab) => {
+    setActiveTab(tabId);
+    const tab = tabs.find(t => t.id === tabId);
+    if (tab?.subTabs) {
+      setActiveSubTab(tab.subTabs[0].id as AdminSubTab);
+    } else {
+      setActiveSubTab(null);
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <DashboardLayout 
+        user={user} 
+        onLogout={onLogout} 
+        activeTab={activeTab} 
+        setActiveTab={setActiveTab} 
+        tabs={tabs}
+        title="Admin Terminal"
+        schoolName="Loading School Data..."
+        emis={user.emis || ''}
+      >
+        <div className="flex flex-col items-center justify-center min-h-[60vh] space-y-6">
+          <div className="relative">
+            <motion.div 
+              animate={{ rotate: 360 }}
+              transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+              className="w-20 h-20 border-t-2 border-r-2 border-emerald-500 rounded-full"
+            />
+            <div className="absolute inset-0 flex items-center justify-center">
+              <Shield className="w-8 h-8 text-emerald-500 animate-pulse" />
+            </div>
+          </div>
+          <div className="text-center space-y-2">
+            <h2 className="text-sm font-bold uppercase tracking-[0.3em] text-slate-400">Synchronizing Data</h2>
+            <p className="text-[10px] text-slate-500 uppercase tracking-widest animate-pulse">Establishing Secure Database Connection...</p>
+          </div>
+        </div>
+      </DashboardLayout>
+    );
+  }
+
+  if (dataError) {
+    return (
+      <DashboardLayout 
+        user={user} 
+        onLogout={onLogout} 
+        activeTab={activeTab} 
+        setActiveTab={setActiveTab} 
+        tabs={tabs}
+        title="Admin Terminal"
+        schoolName="System Alert"
+        emis={user.emis || ''}
+      >
+        <div className="flex flex-col items-center justify-center min-h-[60vh] space-y-8 p-6 text-center">
+          <div className="w-24 h-24 bg-red-500/10 rounded-[2.5rem] flex items-center justify-center border border-red-500/20 shadow-2xl shadow-red-500/10">
+            <X className="w-12 h-12 text-red-500" />
+          </div>
+          <div className="max-w-md space-y-4">
+            <h2 className="text-xl font-light uppercase tracking-[0.2em] text-slate-900 dark:text-white">Authentication Failure</h2>
+            <p className="text-[10px] text-slate-500 uppercase tracking-widest leading-loose bg-red-500/5 p-4 border border-red-500/10 rounded-2xl">
+              {dataError}
+            </p>
+          </div>
+          <button 
+            onClick={() => window.location.reload()}
+            className="px-8 py-4 bg-slate-900 dark:bg-white text-white dark:text-slate-900 rounded-2xl font-bold text-[10px] uppercase tracking-widest hover:scale-105 transition-transform active:scale-95 shadow-xl"
+          >
+            Re-initiate System
+          </button>
+        </div>
+      </DashboardLayout>
+    );
+  }
+
+  return (
+    <DashboardLayout 
+      user={user} 
+      onLogout={onLogout} 
+      activeTab={activeTab} 
+      setActiveTab={handleTabClick} 
+      activeSubTab={activeSubTab}
+      setActiveSubTab={setActiveSubTab}
+      tabs={tabs}
+      title="Admin Terminal"
+      schoolName={schoolName}
+      emis={user.emis || ''}
+      todayAttendance={todayAttendance}
+    >
+      <AnimatePresence mode="wait">
+        {activeTab === 'home' && (
+          <motion.div key="home" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
+            <div className="grid md:grid-cols-3 gap-6">
+              <div className="md:col-span-2 space-y-6">
+                <div className="grid grid-cols-2 gap-4">
+                    <div className="bg-card border border-border p-6 rounded-2xl transition-all shadow-sm">
+                      <p className="text-[8px] text-slate-500 uppercase tracking-widest mb-1">Active Teachers</p>
+                      <p className="text-2xl font-mono text-slate-900 dark:text-white">{teachers.filter(t => t.is_active).length} / {teachers.length}</p>
+                   </div>
+                   <div className="bg-card border border-border p-6 rounded-2xl transition-all shadow-sm">
+                      <p className="text-[8px] text-[#10b981] uppercase tracking-widest mb-1">Class assignments</p>
+                      <p className="text-2xl font-mono text-slate-900 dark:text-white">
+                        {allClasses.filter(cls => 
+                          cls.teacher_id !== null || assignments.some(a => a.class_id === cls.id)
+                        ).length} / {allClasses.length}
+                      </p>
+                   </div>
+                </div>
+
+                <div className="bg-card border border-border p-6 rounded-2xl transition-all shadow-xl">
+                   <h4 className="text-[9px] font-bold uppercase tracking-widest text-slate-500 mb-6 flex items-center gap-2">
+                      <BarChart3 className="w-3 h-3" /> Class-wise Attendance
+                   </h4>
+                   <div className="h-48 w-full min-h-[200px]">
+                      <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
+                         <BarChart data={statsData}>
+                            <XAxis dataKey="name" hide />
+                            <YAxis hide domain={[0, 100]} />
+                            <Tooltip contentStyle={{ backgroundColor: theme === 'dark' ? '#0f172a' : '#ffffff', border: `1px solid ${theme === 'dark' ? '#1e293b' : '#e2e8f0'}`, fontSize: '10px', color: theme === 'dark' ? '#fff' : '#000' }} />
+                            <Bar dataKey="attendance" fill="#10b981" radius={[4, 4, 0, 0]} barSize={20} />
+                         </BarChart>
+                      </ResponsiveContainer>
+                   </div>
+                </div>
+              </div>
+
+              <div className="space-y-6">
+                <div className="bg-card border border-border rounded-2xl p-6 shadow-sm">
+                  <div className="flex items-center justify-between mb-6">
+                     <h3 className="text-[9px] font-bold uppercase tracking-widest text-slate-500">My Shift</h3>
+                     <div className={`flex items-center gap-2 px-3 py-1 rounded-full text-[8px] font-bold uppercase ${isCheckedIn ? 'bg-emerald-500/10 text-emerald-500' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}>
+                        <div className={`w-1.5 h-1.5 rounded-full ${isCheckedIn ? 'bg-emerald-500' : 'bg-slate-400 dark:bg-slate-500'}`} />
+                        {isCheckedIn ? 'Presence Active' : 'Off Clock'}
+                     </div>
+                  </div>
+
+                  {todayAttendance && (
+                    <div className="grid grid-cols-2 gap-3 mb-6">
+                      <div className="p-3 bg-slate-50 dark:bg-[#020617] border border-slate-100 dark:border-slate-800 rounded-xl">
+                        <p className="text-[7px] text-slate-500 uppercase tracking-widest mb-1">Initiation Time</p>
+                        <p className="text-xs font-bold text-slate-900 dark:text-white font-mono">{todayAttendance.check_in || '--:--:--'}</p>
+                      </div>
+                      <div className="p-3 bg-slate-50 dark:bg-[#020617] border border-slate-100 dark:border-slate-800 rounded-xl">
+                        <p className="text-[7px] text-slate-500 uppercase tracking-widest mb-1">Last Out</p>
+                        <p className="text-xs font-bold text-slate-900 dark:text-white font-mono">{todayAttendance.check_out || '--:--:--'}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  <button 
+                    onClick={handlePunch} 
+                    className={`w-full py-4 rounded-xl font-bold uppercase tracking-widest text-xs transition-colors ${isCheckedIn ? 'bg-red-500/10 border border-red-500/30 text-red-500 hover:bg-red-500/20' : 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-500 hover:bg-emerald-500/20'}`}
+                  >
+                    {isCheckedIn ? 'Terminate Shift' : 'Initiate Shift'}
+                  </button>
+                </div>
+
+                <div className="bg-card border border-border rounded-2xl p-6 shadow-sm overflow-hidden">
+                  <h4 className="text-[9px] font-bold uppercase tracking-widest text-slate-500 mb-4">Quick Logs</h4>
+                  <div className="space-y-3">
+                    {teacherLogs.slice(0, 3).map((log, i) => (
+                      <div key={`admin-quick-log-${log.id || `idx-${i}`}`} className="flex justify-between items-center py-2 border-b border-slate-100 dark:border-slate-800 last:border-0">
+                        <div>
+                          <p className="text-[8px] font-bold text-slate-900 dark:text-white">{log.attendance_date}</p>
+                          <p className="text-[7px] text-slate-500">{log.check_in} - {log.check_out || 'Active'}</p>
+                        </div>
+                        <span className="text-[7px] font-mono text-[#10b981]">{log.duration || '--'}</span>
+                      </div>
+                    ))}
+                    {teacherLogs.length === 0 && (
+                      <p className="text-[8px] text-slate-500 italic">No attendance records found</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+               <h3 className="text-[10px] uppercase font-bold tracking-widest text-[#10b981]">Recent Alerts</h3>
+               {statsData.filter(s => s.attendance < 90).map((s, idx) => (
+                 <div key={`admin-attendance-alert-${s.id || `idx-${idx}`}`} className="bg-card/50 border border-border p-4 rounded-xl flex items-center justify-between shadow-sm">
+                    <p className="text-[10px] text-slate-600 dark:text-slate-300">{s.name} attendance dropped to {s.attendance}%</p>
+                    <span className="text-[8px] text-slate-400 dark:text-slate-600 font-mono italic">Just now</span>
+                 </div>
+               ))}
+               {statsData.filter(s => s.attendance < 90).length === 0 && (
+                 <div className="bg-card/50 border border-border p-4 rounded-xl flex items-center justify-between shadow-sm">
+                    <p className="text-[10px] text-slate-600 dark:text-slate-300">System Status: All nodes operational</p>
+                    <span className="text-[8px] text-slate-400 dark:text-slate-600 font-mono italic">Just now</span>
+                 </div>
+               )}
+            </div>
+          </motion.div>
+        )}
+
+        {activeTab === 'teachers' && activeSubTab === 'staff-list' && (
+          <motion.div key="staff-list" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-6 pb-20">
+            <div className="flex flex-col md:flex-row gap-4 mb-2">
+              <div className="relative flex-1">
+                <input 
+                  type="text" 
+                  placeholder="Search Instructor..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full bg-card border border-border py-4 pl-12 pr-4 rounded-2xl text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none shadow-sm transition-all"
+                />
+                <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              </div>
+              <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-xl">
+                {(['all', 'active', 'inactive'] as const).map(filter => (
+                  <button 
+                    key={`admin-t-filter-${filter}`}
+                    onClick={() => setTeacherFilter(filter)}
+                    className={`px-4 py-2 text-[8px] font-bold uppercase tracking-widest rounded-lg transition-all ${teacherFilter === filter ? 'bg-white dark:bg-slate-700 text-emerald-500 shadow-sm' : 'text-slate-500'}`}
+                  >
+                    {filter}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+               {teachers
+                .filter(t => {
+                  const matchesSearch = (t.name || '').toLowerCase().includes(searchQuery.toLowerCase()) || 
+                                      (t.designation || '').toLowerCase().includes(searchQuery.toLowerCase());
+                  const matchesFilter = teacherFilter === 'all' || 
+                                       (teacherFilter === 'active' && t.is_active) || 
+                                       (teacherFilter === 'inactive' && !t.is_active);
+                  return matchesSearch && matchesFilter;
+                })
+                .map((t, idx) => (
+                 <div 
+                   key={`admin-teacher-card-${t.id || `idx-${idx}`}`} 
+                   onClick={() => setSelectedTeacherId(t.id)}
+                   className="bg-card border border-border p-5 rounded-2xl flex flex-col group cursor-pointer hover:border-emerald-500/50 transition-all shadow-sm relative overflow-hidden"
+                 >
+                    <div className="flex items-start justify-between mb-4">
+                       <div className="flex items-center gap-3">
+                          <div className={`w-10 h-10 rounded-xl ${t.is_active ? 'bg-emerald-500/10 text-emerald-500' : 'bg-slate-100 dark:bg-slate-800 text-slate-400'} flex items-center justify-center border border-current/10`}>
+                             <User className="w-5 h-5" />
+                          </div>
+                          <div>
+                             <p className="text-xs font-bold text-slate-900 dark:text-white uppercase tracking-widest leading-tight">{t.name}</p>
+                             <p className="text-[8px] text-slate-500 font-mono mt-0.5">{t.designation || 'Staff Member'}</p>
+                          </div>
+                       </div>
+                       <div className={`w-2 h-2 rounded-full ${t.is_active ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 'bg-slate-300 dark:bg-slate-700'}`} />
+                    </div>
+
+                    <div className="space-y-2 mt-auto">
+                       <div className="flex items-center gap-2 text-slate-400">
+                          <Clock className="w-3 h-3" />
+                          <span className="text-[8px] uppercase tracking-widest font-mono">Last login: {t.last_login ? new Date(t.last_login).toLocaleDateString() : 'Never'}</span>
+                       </div>
+                       <div className="flex items-center justify-between pt-3 border-t border-slate-100 dark:border-slate-800">
+                          <div className="flex -space-x-1.5">
+                            {assignments.filter(a => a.teacher_id === t.id).slice(0, 3).map((a, idx) => (
+                              <div key={`admin-teacher-${t.id}-assign-indicator-${idx}`} className="w-5 h-5 rounded-md bg-slate-100 dark:bg-slate-800 border-2 border-white dark:border-[#0f172a] flex items-center justify-center">
+                                <span className="text-[7px] font-bold text-slate-500 uppercase">{allClasses.find(c => c.id === a.class_id)?.class_name?.charAt(0)}</span>
+                              </div>
+                            ))}
+                          </div>
+                          <span className="text-[8px] text-emerald-500 font-bold uppercase tracking-widest">Details →</span>
+                       </div>
+                    </div>
+                 </div>
+                ))}
+            </div>
+
+            {/* Teacher Details Overlay */}
+            <AnimatePresence>
+              {selectedTeacherId && (
+                <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
+                  <motion.div 
+                    initial={{ opacity: 0 }} 
+                    animate={{ opacity: 1 }} 
+                    exit={{ opacity: 0 }} 
+                    className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" 
+                    onClick={() => setSelectedTeacherId(null)}
+                  />
+                  <motion.div 
+                    initial={{ scale: 0.95, opacity: 0, y: 20 }} 
+                    animate={{ scale: 1, opacity: 1, y: 0 }}
+                    exit={{ scale: 0.95, opacity: 0, y: 20 }}
+                    className="bg-card border border-border w-full max-w-lg rounded-[2.5rem] overflow-hidden shadow-2xl relative"
+                  >
+                    {(() => {
+                      const teacher = teachers.find(t => t.id === selectedTeacherId);
+                      if (!teacher) return null;
+                      const teacherAssignments = assignments.filter(a => a.teacher_id === teacher.id);
+                      
+                      return (
+                        <div className="flex flex-col">
+                          {/* Header section */}
+                          <div className="bg-slate-50 dark:bg-[#020617] p-8 border-b border-slate-200 dark:border-slate-800">
+                            <div className="flex justify-between items-start mb-6">
+                              <div className="w-16 h-16 bg-emerald-500 rounded-3xl flex items-center justify-center text-slate-900 shadow-xl shadow-emerald-500/20 overflow-hidden">
+                                {teacher.profile_picture_url ? (
+                                  <img src={teacher.profile_picture_url} alt={teacher.name || ''} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                                ) : (
+                                  <User className="w-8 h-8" />
+                                )}
+                              </div>
+                        <div className="flex gap-2">
+                           <button 
+                            disabled={isDeleting == selectedTeacherId}
+                            onClick={() => teacher.id && handleDeleteTeacher(teacher.id)}
+                            className={`w-10 h-10 rounded-2xl border flex items-center justify-center transition-colors ${isDeleting == selectedTeacherId ? 'opacity-50 cursor-not-allowed' : 'bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-400 hover:text-red-500'}`}
+                            title="Delete Teacher Account"
+                           >
+                             <Trash2 className="w-5 h-5" />
+                           </button>
+                           <button 
+                            onClick={() => setSelectedTeacherId(null)}
+                            className="w-10 h-10 rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-400 hover:text-red-500 transition-colors"
+                           >
+                             <X className="w-5 h-5" />
+                           </button>
+                        </div>
+                            </div>
+                            <div>
+                               <h3 className="text-xl font-bold text-slate-900 dark:text-white uppercase tracking-widest mb-1">{teacher.name}</h3>
+                               <p className="text-[10px] text-emerald-500 font-bold uppercase tracking-[0.3em]">{teacher.designation || 'Faculty Member'}</p>
+                            </div>
+                          </div>
+
+                          {/* Info Body */}
+                          <div className="p-8 space-y-8 overflow-y-auto max-h-[60vh] custom-scrollbar">
+                            <div className="grid grid-cols-2 gap-6">
+                              <div className="space-y-1">
+                                <p className="text-[8px] text-slate-500 uppercase tracking-widest font-bold">Contact Number</p>
+                                <p className="text-xs text-slate-900 dark:text-slate-300 font-mono">{teacher.mobile || 'Not available'}</p>
+                              </div>
+                              <div className="space-y-1">
+                                <p className="text-[8px] text-slate-500 uppercase tracking-widest font-bold">Official Email</p>
+                                <p className="text-xs text-slate-900 dark:text-slate-300 font-mono lowercase">{teacher.email || 'pending.setup'}</p>
+                              </div>
+                              <div className="space-y-1">
+                                <p className="text-[8px] text-slate-500 uppercase tracking-widest font-bold">CNIC / ID Card</p>
+                                <p className="text-xs text-slate-900 dark:text-slate-300 font-mono">{teacher.cnic || '11111-1111111-1'}</p>
+                              </div>
+                              <div className="space-y-1">
+                                <p className="text-[8px] text-slate-500 uppercase tracking-widest font-bold">Personnel ID</p>
+                                <p className="text-xs text-slate-900 dark:text-slate-300 font-mono">{teacher.personnel || 'N/A'}</p>
+                              </div>
+                            </div>
+
+                            <div className="space-y-4">
+                               <h4 className="text-[9px] font-bold uppercase tracking-[0.2em] text-slate-400 border-b border-slate-100 dark:border-slate-800 pb-2">Load Capacity: {teacherAssignments.length} Classes</h4>
+                               <div className="grid gap-3">
+                                 {teacherAssignments.map((a, idx) => {
+                                   const cls = allClasses.find(c => c.id === a.class_id);
+                                   const sect = sections.find(s => s.id === a.section_id);
+                                   return (
+                                     <div key={`teacher-assign-detail-row-${a.id || `idx-${idx}`}`} className="flex items-center justify-between p-4 bg-slate-50 dark:bg-slate-800/30 rounded-2xl border border-slate-100 dark:border-slate-800">
+                                       <div className="flex items-center gap-3">
+                                          <div className="w-8 h-8 rounded-xl bg-white dark:bg-slate-900 flex items-center justify-center text-emerald-500 shadow-sm">
+                                             <Award className="w-4 h-4" />
+                                          </div>
+                                          <div>
+                                             <p className="text-[10px] font-bold text-slate-900 dark:text-white uppercase leading-tight">{cls?.class_name}</p>
+                                             <p className="text-[8px] text-slate-500 uppercase tracking-widest mt-0.5">{sect ? `Section ${sect.section_name}` : 'Main Branch'}</p>
+                                          </div>
+                                       </div>
+                                       <span className="text-[8px] font-mono text-slate-400">{a.period || 'Period N/A'}</span>
+                                     </div>
+                                   );
+                                 })}
+                                 {teacherAssignments.length === 0 && (
+                                   <div className="py-8 text-center bg-slate-50 dark:bg-slate-800/20 rounded-2xl border border-dashed border-slate-200 dark:border-slate-700">
+                                      <p className="text-[10px] text-slate-400 uppercase tracking-widest">No assigned workload</p>
+                                   </div>
+                                 )}
+                               </div>
+                            </div>
+                          </div>
+
+                          <div className="p-8 pt-0 mt-auto">
+                             <button 
+                               onClick={() => setSelectedTeacherId(null)}
+                               className="w-full py-4 bg-emerald-500 text-slate-900 font-bold uppercase tracking-[0.2em] text-[10px] rounded-2xl shadow-xl shadow-emerald-500/10 hover:bg-emerald-400 transition-all"
+                             >
+                               Acknowledge Terminal
+                             </button>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </motion.div>
+                </div>
+              )}
+            </AnimatePresence>
+          </motion.div>
+        )}
+
+        {activeTab === 'teachers' && activeSubTab === 'staff-add' && (
+          <motion.div key="staff-add" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-6 pb-20">
+             <div className="flex items-center justify-between">
+                <h3 className="text-xl font-light uppercase tracking-[0.2em] text-slate-900 dark:text-white">Recruit New Instructor</h3>
+             </div>
+
+             <div className="bg-card border border-border p-8 rounded-[2.5rem] shadow-2xl">
+                <div className="grid md:grid-cols-2 gap-8">
+                   <div className="space-y-4">
+                      <div>
+                         <label className="text-[9px] font-bold uppercase tracking-widest text-slate-400 ml-4 mb-2 block">Full Name</label>
+                         <input type="text" className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-4 rounded-2xl outline-none focus:border-emerald-500 text-xs" placeholder="e.g. Dr. Sarah Connor" />
+                      </div>
+                      <div>
+                         <label className="text-[9px] font-bold uppercase tracking-widest text-slate-400 ml-4 mb-2 block">Designation</label>
+                         <input type="text" className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-4 rounded-2xl outline-none focus:border-emerald-500 text-xs" placeholder="e.g. Senior Lecturer" />
+                      </div>
+                   </div>
+                   <div className="space-y-4">
+                      <div>
+                         <label className="text-[9px] font-bold uppercase tracking-widest text-slate-400 ml-4 mb-2 block">Email Address</label>
+                         <input type="email" className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-4 rounded-2xl outline-none focus:border-emerald-500 text-xs" placeholder="instructor@academy.edu" />
+                      </div>
+                      <div>
+                         <label className="text-[9px] font-bold uppercase tracking-widest text-slate-400 ml-4 mb-2 block">Contact Number</label>
+                         <input type="text" className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-4 rounded-2xl outline-none focus:border-emerald-500 text-xs" placeholder="+92 XXX XXXXXXX" />
+                      </div>
+                   </div>
+                </div>
+                <div className="mt-8 pt-8 border-t border-slate-100 dark:border-slate-800 flex justify-end">
+                   <button className="px-10 py-4 bg-slate-900 dark:bg-white text-white dark:text-slate-900 rounded-2xl text-[10px] font-bold uppercase tracking-[0.2em] hover:scale-105 transition-all">
+                      Initialize Onboarding
+                   </button>
+                </div>
+             </div>
+          </motion.div>
+        )}
+        {activeTab === 'classes' && activeSubTab === 'class-manage' && (
+          <motion.div key="class-manage" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-6 pb-20">
+             <div className="flex items-center justify-between">
+                <h3 className="text-xl font-light uppercase tracking-[0.2em] text-slate-900 dark:text-white">
+                  {selectedClassForDetail ? 'Class Roster Terminal' : 'Global Student Control'}
+                </h3>
+                <div className="flex gap-2">
+                   {selectedClassForDetail && (
+                     <button 
+                       onClick={() => setSelectedClassForDetail(null)}
+                       className="text-[9px] font-bold uppercase tracking-widest text-slate-500 hover:text-white"
+                     >
+                       ← All Sectors
+                     </button>
+                   )}
+                </div>
+             </div>
+
+             {!selectedClassForDetail ? (
+               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {allClasses.map((cls, i) => (
+                    <div 
+                      key={`class-dir-card-${cls.id || i}`} 
+                      onClick={() => handleViewClassDetail(cls)}
+                      className="bg-card border border-border p-6 rounded-[2rem] space-y-4 cursor-pointer hover:border-emerald-500/50 transition-all group shadow-xl"
+                    >
+                       <div className="w-12 h-12 bg-emerald-500/10 rounded-2xl flex items-center justify-center text-emerald-500">
+                          <Layers className="w-6 h-6" />
+                       </div>
+                       <div>
+                          <h4 className="text-lg font-bold uppercase tracking-tight text-slate-900 dark:text-white group-hover:text-emerald-500 transition-colors">{cls.class_name}</h4>
+                          <p className="text-[10px] text-slate-500 uppercase tracking-widest mt-1">EMIS: {cls.emis || user.emis}</p>
+                       </div>
+                       <div className="pt-4 border-t border-slate-100 dark:border-slate-800 flex justify-between items-center text-[9px] font-bold uppercase tracking-widest text-slate-400 group-hover:text-emerald-500 transition-all">
+                          <span>Directory Access</span>
+                          <ChevronRight className="w-4 h-4" />
+                       </div>
+                    </div>
+                  ))}
+               </div>
+             ) : (
+               <div className="space-y-6">
+                  <div className="bg-card border border-emerald-500/20 p-8 rounded-[2.5rem] shadow-2xl flex flex-col md:flex-row justify-between items-center gap-6">
+                     <div>
+                        <h4 className="text-2xl font-bold uppercase tracking-widest text-white">{selectedClassForDetail.class_name}</h4>
+                        <p className="text-[10px] text-emerald-500 uppercase font-mono tracking-widest mt-2">Active Sector Repository • Capacity: {classDetailStudents.length}</p>
+                     </div>
+                     <button 
+                       onClick={() => {
+                         setEnrollForm({
+                           name: '',
+                           admission_no: `ADM-${new Date().getFullYear()}-${Math.floor(Math.random() * 10000)}`,
+                           gender: 'MALE',
+                           dob: '',
+                           father_name: '',
+                           father_mobile: '',
+                           class_id: selectedClassForDetail.id?.toString() || '',
+                           section_id: '',
+                           emis: user.id.toString()
+                         });
+                         setShowEnrolmentForm(true);
+                       }}
+                       className="bg-emerald-500 text-slate-950 px-8 py-4 rounded-2xl text-[10px] font-bold uppercase tracking-widest shadow-xl shadow-emerald-500/20 hover:scale-105 active:scale-95 transition-all flex items-center gap-2"
+                     >
+                        <UserPlus className="w-4 h-4" /> Enrol New Student
+                     </button>
+                  </div>
+
+                  {showEnrolmentForm && (
+                     <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} className="bg-card border border-border p-8 rounded-[2.5rem] shadow-2xl space-y-8">
+                        <div className="flex justify-between items-center">
+                           <h4 className="text-[10px] font-bold uppercase tracking-widest text-emerald-500">Rapid Identity Creation Terminal</h4>
+                           <button onClick={() => setShowEnrolmentForm(false)} className="p-2 bg-slate-800 rounded-xl text-slate-400 hover:text-white transition-all"><X className="w-4 h-4" /></button>
+                        </div>
+                        <form onSubmit={handleEnrollStudent} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                           <div className="space-y-1">
+                              <label className="text-[9px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Name</label>
+                              <input required value={enrollForm.name} onChange={e => setEnrollForm({...enrollForm, name: e.target.value})} className="w-full bg-[#020617] border border-slate-800 rounded-xl px-4 py-3 text-xs text-white" />
+                           </div>
+                           <div className="space-y-1">
+                              <label className="text-[9px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Admission No</label>
+                              <input required value={enrollForm.admission_no} onChange={e => setEnrollForm({...enrollForm, admission_no: e.target.value})} className="w-full bg-[#020617] border border-slate-800 rounded-xl px-4 py-3 text-xs text-white font-mono" />
+                           </div>
+                           <div className="space-y-1">
+                              <label className="text-[9px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Gender</label>
+                              <select value={enrollForm.gender} onChange={e => setEnrollForm({...enrollForm, gender: e.target.value})} className="w-full bg-[#020617] border border-slate-800 rounded-xl px-4 py-3 text-xs text-white">
+                                 <option value="MALE">MALE</option>
+                                 <option value="FEMALE">FEMALE</option>
+                              </select>
+                           </div>
+                           <div className="flex items-end">
+                              <button type="submit" className="w-full py-4 bg-emerald-500 text-slate-950 rounded-xl font-bold uppercase tracking-widest text-[9px] shadow-lg shadow-emerald-500/10 hover:bg-emerald-400 transition-all">Create Record</button>
+                           </div>
+                        </form>
+                     </motion.div>
+                  )}
+
+                  <div className="bg-card border border-border rounded-[2.5rem] overflow-hidden shadow-2xl">
+                     <div className="overflow-x-auto">
+                        <table className="w-full text-left">
+                           <thead>
+                              <tr className="bg-slate-50 dark:bg-[#020617]/30 border-b border-border">
+                                 <th className="px-8 py-6 text-[9px] font-bold uppercase tracking-widest text-slate-400">Student Unit</th>
+                                 <th className="px-8 py-6 text-[9px] font-bold uppercase tracking-widest text-slate-400 text-center">Admission ID</th>
+                                 <th className="px-8 py-6 text-[9px] font-bold uppercase tracking-widest text-slate-400 text-right">Direct Management</th>
+                              </tr>
+                           </thead>
+                           <tbody className="divide-y divide-border">
+                              {classDetailStudents.map((s, idx) => (
+                                 <tr key={`student-manage-row-${s.id || idx}`} className="group hover:bg-emerald-500/5 transition-all">
+                                    <td className="px-8 py-5 flex items-center gap-4">
+                                       <div className="w-10 h-10 rounded-2xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-xs font-bold text-slate-500 border border-slate-200 dark:border-slate-800">
+                                          {(s.name || 'A').charAt(0)}
+                                       </div>
+                                       <div>
+                                          <span className="text-xs font-bold text-slate-900 dark:text-white uppercase tracking-tight">{s.name}</span>
+                                          <p className="text-[8px] text-slate-500 uppercase tracking-widest mt-0.5">{s.gender} • {s.student_status || 'Active'}</p>
+                                       </div>
+                                    </td>
+                                    <td className="px-8 py-5 text-center font-mono text-[10px] text-slate-500">{s.admission_no}</td>
+                                    <td className="px-8 py-5 text-right">
+                                       <div className="flex justify-end gap-3 translate-x-2 group-hover:translate-x-0 transition-transform">
+                                          <button 
+                                            onClick={() => {
+                                              const newName = prompt('Enter new synchronization name:', s.name);
+                                              if (newName) alert(`Identity update for ${newName} authorized locally.`);
+                                            }}
+                                            className="p-3 text-slate-400 hover:text-emerald-500 hover:bg-emerald-500/10 rounded-xl transition-all border border-transparent hover:border-emerald-500/20"
+                                            title="Modify Identity"
+                                          >
+                                             <Edit className="w-4 h-4" />
+                                          </button>
+                                          <button 
+                                            onClick={() => handleDeleteStudent(s.id!)}
+                                            className="p-3 text-slate-400 hover:text-rose-500 hover:bg-rose-500/10 rounded-xl transition-all border border-transparent hover:border-rose-500/20"
+                                            title="Purge Entry"
+                                          >
+                                             <Trash2 className="w-4 h-4" />
+                                          </button>
+                                       </div>
+                                    </td>
+                                 </tr>
+                              ))}
+                              {classDetailStudents.length === 0 && (
+                                 <tr>
+                                    <td colSpan={3} className="py-20 text-center">
+                                       <p className="text-[10px] text-slate-500 uppercase tracking-widest font-bold">No candidate profiles identified in this sector</p>
+                                    </td>
+                                 </tr>
+                              )}
+                           </tbody>
+                        </table>
+                     </div>
+                  </div>
+               </div>
+             )}
+          </motion.div>
+        )}
+
+        {activeTab === 'classes' && activeSubTab === 'class-attendance' && (
+          <motion.div key="class-attendance" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-6 pb-20">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xl font-light uppercase tracking-[0.2em] text-slate-900 dark:text-white">
+                {selectedClassId ? 'Class Register' : 'My Instruction Hub'}
+              </h3>
+              {selectedClassId && (
+                <button 
+                  onClick={() => setSelectedClassId(null)}
+                  className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-white"
+                >
+                  ← All My Classes
+                </button>
+              )}
+            </div>
+
+            {!selectedClassId ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {myAssignedClasses.map((cls, idx) => (
+                  <div 
+                    key={`admin-teacher-myclass-${cls.id || idx}`}
+                    onClick={() => { setSelectedClassId(cls.id); fetchStudents(cls.id); }}
+                    className="bg-card border border-border p-6 rounded-3xl hover:border-emerald-500/50 transition-all cursor-pointer group shadow-xl"
+                  >
+                    <div className="flex justify-between items-start mb-6">
+                      <div className="w-12 h-12 bg-emerald-500/10 rounded-2xl flex items-center justify-center text-emerald-500">
+                        <Users className="w-6 h-6" />
+                      </div>
+                      <span className="text-[8px] font-bold text-emerald-500 border border-emerald-500/20 px-2 py-1 rounded-full uppercase tracking-widest">Active</span>
+                    </div>
+                    <h4 className="text-lg font-bold text-slate-900 dark:text-white uppercase tracking-tight group-hover:text-emerald-500 transition-colors">{cls.class_name}</h4>
+                    <p className="text-[10px] text-slate-500 uppercase tracking-widest mt-1">Section: {sections.find(s => s.id === cls.section_id)?.section_name || 'Main'}</p>
+                    <div className="mt-8 pt-6 border-t border-slate-100 dark:border-slate-800 flex justify-between items-center">
+                      <span className="text-[10px] text-slate-400 uppercase font-mono tracking-widest">Mark Attendance</span>
+                      <ChevronRight className="w-4 h-4 text-slate-400" />
+                    </div>
+                  </div>
+                ))}
+                {myAssignedClasses.length === 0 && (
+                  <div className="col-span-full py-20 text-center bg-slate-50 dark:bg-[#020617] border border-dashed border-slate-800 rounded-3xl">
+                    <p className="text-[10px] text-slate-500 uppercase tracking-widest leading-loose">No classroom assignments identified for your administrative profile</p>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
+                <div className="bg-card border border-emerald-500/20 p-6 rounded-3xl space-y-4">
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <h3 className="text-sm font-bold uppercase tracking-widest text-[#10b981]">
+                        {myAssignedClasses.find(c => c.id === selectedClassId)?.class_name}
+                      </h3>
+                      <div className="flex items-center gap-3 mt-1">
+                        <span className="text-[9px] text-slate-500 uppercase tracking-widest">Register Terminal</span>
+                        <span className="w-1 h-1 rounded-full bg-slate-700" />
+                        <span className="text-[9px] text-slate-500 uppercase tracking-widest">{attendanceMode === 'mark' ? 'Input Active' : 'Historical View'}</span>
+                      </div>
+                    </div>
+                    <div className="flex bg-slate-900/50 p-1 rounded-xl border border-slate-800">
+                      <button 
+                        onClick={() => { setAttendanceMode('mark'); setShowReport(false); }}
+                        className={`px-4 py-2 rounded-lg text-[8px] font-bold uppercase tracking-widest transition-all ${attendanceMode === 'mark' ? 'bg-emerald-500 text-slate-950' : 'text-slate-500 hover:text-white'}`}
+                      >Mark</button>
+                      <button 
+                        onClick={() => { setAttendanceMode('report'); fetchAttendanceForDate(selectedClassId, reportDate); }}
+                        className={`px-4 py-2 rounded-lg text-[8px] font-bold uppercase tracking-widest transition-all ${attendanceMode === 'report' ? 'bg-emerald-500 text-slate-950' : 'text-slate-500 hover:text-white'}`}
+                      >Analysis</button>
+                    </div>
+                  </div>
+                  <div className="pt-4 border-t border-slate-800/50 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Calendar className="w-4 h-4 text-emerald-500" />
+                      <span className="text-[9px] text-slate-400 uppercase tracking-widest font-bold">Log Date</span>
+                    </div>
+                    <input 
+                      type="date" 
+                      value={reportDate}
+                      onChange={(e) => {
+                        setReportDate(e.target.value);
+                        if (attendanceMode === 'report') fetchAttendanceForDate(selectedClassId, e.target.value);
+                      }}
+                      className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white focus:border-emerald-500 outline-none"
+                    />
+                  </div>
+                </div>
+
+                {attendanceMode === 'mark' ? (
+                  <div className="space-y-6">
+                    <div className="flex items-center justify-between px-2">
+                       <h4 className="text-[10px] uppercase tracking-widest text-slate-500 font-bold">Students List</h4>
+                       <button 
+                         onClick={toggleSort}
+                         className="flex items-center gap-2 px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-[9px] font-bold uppercase tracking-widest text-slate-400 hover:text-emerald-500 transition-colors"
+                       >
+                         {sortDirection === 'asc' ? <ArrowUp className="w-3 h-3" /> : sortDirection === 'desc' ? <ArrowDown className="w-3 h-3" /> : <ArrowUpDown className="w-3 h-3" />}
+                         Sort by ADM
+                       </button>
+                    </div>
+                    <div className="grid gap-3">
+                      {sortedStudents.map((student, i) => {
+                        const status = attendanceRecords[student.id!] || 'Present';
+                        return (
+                          <div key={`teacher-att-student-${student.id || i}`} className="bg-card border border-border p-4 rounded-2xl flex items-center justify-between group hover:border-slate-700 transition-all">
+                            <div className="flex items-center gap-4">
+                              <div className="w-10 h-10 rounded-xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-xs font-bold text-slate-500 border border-slate-200 dark:border-slate-800">
+                                {student.name.charAt(0)}
+                              </div>
+                              <div>
+                                <p className="text-xs font-bold text-slate-900 dark:text-white uppercase tracking-tight">{student.name}</p>
+                                <p className="text-[8px] text-slate-500 font-mono mt-0.5 tracking-widest uppercase">ADM: {student.admission_no}</p>
+                              </div>
+                            </div>
+                            <div className="flex gap-2">
+                              {[
+                                { label: 'P', value: 'Present' as const, color: 'emerald' },
+                                { label: 'A', value: 'Absent' as const, color: 'rose' },
+                                { label: 'S', value: 'Sick' as const, color: 'amber' },
+                                { label: 'L', value: 'Leave' as const, color: 'blue' }
+                              ].map((btn) => (
+                                <button 
+                                  key={`att-btn-${btn.value}`}
+                                  onClick={() => updateAttendanceStatus(student.id!, btn.value)}
+                                  className={`w-9 h-9 rounded-xl text-[10px] font-bold border transition-all ${
+                                    status === btn.value 
+                                      ? `bg-${btn.color}-500 text-white border-${btn.color}-500 shadow-lg shadow-${btn.color}-500/20`
+                                      : 'bg-slate-100 dark:bg-slate-800 text-slate-500 border-slate-200 dark:border-slate-700 hover:border-slate-500'
+                                  }`}
+                                >
+                                  {btn.label}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <button 
+                      onClick={saveAttendance}
+                      disabled={isSavingAttendance}
+                      className="w-full py-5 bg-emerald-500 text-slate-950 rounded-2xl font-bold uppercase tracking-[0.2em] text-[10px] shadow-xl shadow-emerald-500/20 hover:bg-emerald-400 transition-all disabled:opacity-50"
+                    >
+                      {isSavingAttendance ? 'Storing Records...' : 'Authorize Signature & Save'}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-6">
+                    {showReport && reportData ? (
+                      <div className="space-y-6">
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                           <div className="bg-card border border-border p-5 rounded-3xl">
+                              <p className="text-[8px] text-slate-500 uppercase tracking-widest mb-1">Total</p>
+                              <p className="text-xl font-bold text-white uppercase">{reportData.total}</p>
+                           </div>
+                           <div className="bg-card border border-border p-5 rounded-3xl">
+                              <p className="text-[8px] text-emerald-500 uppercase tracking-widest mb-1">Present</p>
+                              <p className="text-xl font-bold text-emerald-500 uppercase">{reportData.present}</p>
+                           </div>
+                           <div className="bg-card border border-border p-5 rounded-3xl text-rose-500">
+                              <p className="text-[8px] uppercase tracking-widest mb-1">Absent</p>
+                              <p className="text-xl font-bold uppercase">{reportData.absent}</p>
+                           </div>
+                           <div className="bg-card border border-emerald-500/20 p-5 rounded-3xl ring-2 ring-emerald-500/10">
+                              <p className="text-[8px] text-emerald-500 uppercase tracking-widest mb-1">Yield</p>
+                              <p className="text-xl font-bold text-white uppercase">{reportData.presentPercentage}%</p>
+                           </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="py-20 text-center bg-slate-900 border border-slate-800 border-dashed rounded-3xl">
+                         <p className="text-[9px] text-slate-600 uppercase tracking-[0.2em]">No historical analysis identified for this period</p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </motion.div>
+            )}
+          </motion.div>
+        )}
+
+        {activeTab === 'exams' && activeSubTab === 'exam-marking' && (
+          <motion.div key="marks" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-6 pb-20">
+             <div className="flex items-center justify-between">
+                <h3 className="text-xl font-light uppercase tracking-[0.2em] text-slate-900 dark:text-white">Scholar Transcript Portal</h3>
+             </div>
+
+             <div className="bg-card border border-border p-8 rounded-[2.5rem] shadow-2xl space-y-8">
+                <div className="grid md:grid-cols-3 gap-6">
+                   <div className="space-y-2">
+                      <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Academic Orbit</label>
+                      <select 
+                        value={selectedSessionId}
+                        onChange={(e) => setSelectedSessionId(e.target.value)}
+                        className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-2xl px-4 py-4 text-xs text-slate-950 dark:text-white focus:border-emerald-500 outline-none"
+                      >
+                         <option value="">Select Session</option>
+                         {sessions.map(s => <option key={`marks-entry-sess-${s.id}`} value={s.id}>{s.name}</option>)}
+                      </select>
+                   </div>
+                   <div className="space-y-2">
+                      <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Assessment Cycle</label>
+                      <select 
+                        value={selectedSemesterId}
+                        onChange={(e) => setSelectedSemesterId(e.target.value)}
+                        className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-2xl px-4 py-4 text-xs text-slate-950 dark:text-white focus:border-emerald-500 outline-none"
+                      >
+                         <option value="">Select Semester</option>
+                         {semesters.map(s => <option key={`marks-entry-sem-${s.id}`} value={s.id}>{s.name}</option>)}
+                      </select>
+                   </div>
+                   <div className="space-y-2">
+                      <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Instruction Sector (Subject)</label>
+                      <select 
+                        value={selectedClassSubjectId}
+                        onChange={(e) => handleSubjectChange(e.target.value)}
+                        className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-2xl px-4 py-4 text-xs text-slate-950 dark:text-white focus:border-emerald-500 outline-none"
+                      >
+                         <option value="">Select Class & Subject</option>
+                         {classSubjects.map(cs => {
+                            const cls = allClasses.find(c => c.id === cs.class_id);
+                            const subj = subjects.find(s => s.id === cs.subject_id);
+                            return <option key={`marks-entry-cs-${cs.id}`} value={cs.id}>{cls?.class_name} — {subj?.name}</option>;
+                         })}
+                      </select>
+                   </div>
+                </div>
+
+                {selectedClassSubjectId && (
+                  <form onSubmit={saveMarks} className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                     <div className="flex items-center gap-4 p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl shadow-inner">
+                        <div className="w-1 h-12 bg-emerald-500 rounded-full" />
+                        <div>
+                           <p className="text-[9px] text-emerald-500 font-bold uppercase tracking-widest">Entry Parameter Active</p>
+                           <p className="text-xs text-white uppercase font-bold tracking-tight">Total Assessable Marks: {classSubjects.find(cs => cs.id === parseInt(selectedClassSubjectId))?.total_marks}</p>
+                        </div>
+                     </div>
+
+                     <div className="bg-slate-950/30 rounded-3xl border border-slate-800 overflow-hidden shadow-inner">
+                        <table className="w-full text-left">
+                           <thead>
+                              <tr className="bg-slate-900/50 border-b border-slate-800">
+                                 <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Candidate Identity</th>
+                                 <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center cursor-pointer hover:text-emerald-500 transition-colors" onClick={toggleSort}>
+                                   <div className="flex items-center justify-center gap-2">
+                                     {sortDirection === 'asc' ? <ArrowUp className="w-3 h-3" /> : sortDirection === 'desc' ? <ArrowDown className="w-3 h-3" /> : <ArrowUpDown className="w-3 h-3" />}
+                                     Admission No
+                                   </div>
+                                 </th>
+                                 <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Obtained Metrics</th>
+                              </tr>
+                           </thead>
+                           <tbody className="divide-y divide-slate-800">
+                              {sortedStudents.map((student, idx) => (
+                                <tr key={`marks-row-${student.id || idx}`} className="hover:bg-emerald-500/5 transition-colors group">
+                                   <td className="px-6 py-4">
+                                      <p className="text-xs font-bold text-white uppercase tracking-tight group-hover:text-emerald-500 transition-colors">{student.name}</p>
+                                   </td>
+                                   <td className="px-6 py-4 text-center font-mono text-[10px] text-slate-500">{student.admission_no}</td>
+                                   <td className="px-6 py-4 text-right">
+                                      <input 
+                                        type="number"
+                                        min="0"
+                                        max={classSubjects.find(cs => cs.id === parseInt(selectedClassSubjectId))?.total_marks}
+                                        value={marksEntryData[student.id!] || ''}
+                                        onChange={(e) => setMarksEntryData({...marksEntryData, [student.id!]: parseInt(e.target.value)})}
+                                        required
+                                        className="w-24 bg-slate-900 border border-slate-800 rounded-xl px-4 py-3 text-center text-sm font-bold text-emerald-500 focus:border-emerald-500 outline-none transition-all shadow-lg"
+                                      />
+                                   </td>
+                                </tr>
+                              ))}
+                           </tbody>
+                        </table>
+                     </div>
+
+                     <button 
+                       type="submit"
+                       disabled={isSavingMarks}
+                       className="w-full py-5 bg-emerald-500 text-slate-950 rounded-2xl font-bold uppercase tracking-[0.2em] text-[11px] shadow-2xl shadow-emerald-500/20 hover:bg-emerald-400 active:scale-[0.99] transition-all disabled:opacity-50"
+                     >
+                       {isSavingMarks ? 'Transmitting Data...' : 'Finalize & Record Results'}
+                     </button>
+                  </form>
+                )}
+             </div>
+          </motion.div>
+        )}
+
+        <AnimatePresence>
+          {isAssigningTeacherModalOpen && classForNewAssignment && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-[#020617]/90 backdrop-blur-md"
+            >
+              <motion.div
+                initial={{ scale: 0.9, opacity: 0, y: 20 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.9, opacity: 0, y: 20 }}
+                className="bg-card border border-slate-800 p-8 rounded-[2.5rem] shadow-2xl max-w-lg w-full relative overflow-hidden"
+              >
+                {/* Decorative Background Element */}
+                <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-500/5 blur-3xl -mr-16 -mt-16 rounded-full" />
+                
+                <div className="flex justify-between items-start mb-8 relative z-10">
+                  <div className="space-y-1">
+                    <h3 className="text-2xl font-bold tracking-[0.1em] uppercase text-white leading-tight">Assign Faculty</h3>
+                    <div className="flex items-center gap-2">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                      <p className="text-[10px] text-emerald-500 uppercase tracking-widest font-bold">Class: {classForNewAssignment.class_name}</p>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => { setIsAssigningTeacherModalOpen(false); setClassForNewAssignment(null); }}
+                    className="p-3 text-slate-500 hover:text-white bg-slate-800/20 hover:bg-slate-800/40 rounded-2xl transition-all border border-slate-800/50"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <form 
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    const formData = new FormData(e.currentTarget);
+                    const teacherId = Number(formData.get('teacher_id'));
+                    
+                    try {
+                       const newAssignment = {
+                         teacher_id: teacherId,
+                         class_id: classForNewAssignment.id,
+                         section_id: null,
+                         from_date: new Date().toISOString().split('T')[0],
+                         to_date: '2025-06-30',
+                         period: '1st',
+                         emis: user.emis
+                       };
+
+                       if (import.meta.env.VITE_SUPABASE_URL) {
+                         const { data, error } = await supabase
+                           .from('teacher_class_assignment')
+                           .insert([{ ...newAssignment, id: Math.floor(Math.random() * 2147483647) }])
+                           .select();
+                         if (error) throw error;
+                         if (data) setAssignments([...assignments, ...data]);
+                       } else {
+                         setAssignments([...assignments, { ...newAssignment, id: Date.now() } as TeacherClassAssignment]);
+                       }
+                       
+                       setIsAssigningTeacherModalOpen(false);
+                       setClassForNewAssignment(null);
+                       alert('Teacher successfully assigned to this sector.');
+                    } catch (err: any) {
+                       alert(`Assignment failed: ${err.message}`);
+                    }
+                  }}
+                  className="space-y-6 relative z-10"
+                >
+                  <div className="space-y-2">
+                    <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Select Active Instructor</label>
+                    <div className="relative group">
+                      <div className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-emerald-500 transition-colors">
+                        <User className="w-4 h-4" />
+                      </div>
+                      <select 
+                        name="teacher_id" 
+                        required 
+                        className="w-full bg-[#020617] border border-slate-800 rounded-2xl pl-12 pr-4 py-4 text-xs text-white focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/20 outline-none transition-all shadow-inner appearance-none"
+                      >
+                        <option value="">Choose from Directory</option>
+                        {teachers.map(t => (
+                          <option key={`assign-fac-opt-${t.id}`} value={t.id} className="bg-[#020617]">{t.name} — {t.designation || 'Staff'}</option>
+                        ))}
+                      </select>
+                      <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-slate-500">
+                        <ChevronDown className="w-4 h-4" />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-4 bg-emerald-500/5 border border-emerald-500/10 rounded-2xl space-y-2">
+                    <p className="text-[9px] text-emerald-500/80 uppercase font-bold tracking-widest leading-relaxed">
+                      Assigned faculty will receive immediate access to the class register, gradebook, and attendance terminal for this sector.
+                    </p>
+                  </div>
+
+                  <button 
+                    type="submit" 
+                    className="w-full bg-emerald-500 text-slate-950 py-4 rounded-2xl text-[10px] font-bold uppercase tracking-[0.2em] hover:bg-emerald-400 active:scale-[0.98] transition-all shadow-lg shadow-emerald-500/20"
+                  >
+                    Finalize Assignment
+                  </button>
+                </form>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+        
+
+        {activeTab === 'exams' && activeSubTab === 'exam-results' && (
+          <motion.div key="exam-award-list" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-6 pb-20">
+             <div className="flex items-center justify-between">
+                <div>
+                   <h3 className="text-xl font-light uppercase tracking-[0.2em] text-slate-900 dark:text-white">Result Award List</h3>
+                   <p className="text-[10px] text-emerald-500 uppercase tracking-widest font-bold mt-1">Verified Academic Performance Directory</p>
+                </div>
+             </div>
+
+             <div className="bg-card border border-border p-8 rounded-[2.5rem] shadow-xl relative overflow-hidden group">
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-6 relative z-10">
+                   <select 
+                     className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-4 text-[10px] text-slate-900 dark:text-white font-bold uppercase tracking-widest"
+                     onChange={(e) => setSelectedSessionId(e.target.value)}
+                   >
+                      <option value="">Select Session</option>
+                      {sessions.map(s => <option key={`award-sess-${s.id}`} value={s.id}>{s.name}</option>)}
+                   </select>
+                   <select 
+                     className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-4 text-[10px] text-slate-900 dark:text-white font-bold uppercase tracking-widest"
+                     onChange={(e) => setSelectedSemesterId(e.target.value)}
+                   >
+                      <option value="">Select Semester</option>
+                      {semesters.map(s => <option key={`award-sem-${s.id}`} value={s.id}>{s.name}</option>)}
+                   </select>
+                   <select 
+                     className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-4 text-[10px] text-slate-900 dark:text-white font-bold uppercase tracking-widest"
+                     value={selectedClassSubjectId || ''}
+                     onChange={(e) => handleSubjectChange(e.target.value)}
+                   >
+                      <option value="">Select Subject</option>
+                      {classSubjects.map(cs => {
+                        const cls = allClasses.find(c => c.id === cs.class_id);
+                        const subj = subjects.find(s => s.id === cs.subject_id);
+                        return <option key={`award-cs-${cs.id}`} value={cs.id}>{cls?.class_name} — {subj?.name}</option>
+                      })}
+                   </select>
+                   <button className="w-full bg-emerald-500 text-slate-950 font-bold uppercase tracking-[0.2em] text-[10px] rounded-xl hover:bg-emerald-400 active:scale-95 transition-all shadow-lg shadow-emerald-500/20">
+                      Query Records
+                   </button>
+                </div>
+             </div>
+
+             <div className="bg-card border border-border rounded-[3rem] overflow-hidden shadow-2xl">
+                <div className="overflow-x-auto">
+                   <table className="w-full text-left">
+                      <thead>
+                         <tr className="bg-slate-50 dark:bg-slate-900/40">
+                            <th className="px-10 py-6 text-[9px] uppercase tracking-wider text-slate-500 font-bold cursor-pointer hover:text-emerald-500 transition-colors" onClick={toggleSort}>
+                              <div className="flex items-center gap-2">
+                                {sortDirection === 'asc' ? <ArrowUp className="w-3 h-3" /> : sortDirection === 'desc' ? <ArrowDown className="w-3 h-3" /> : <ArrowUpDown className="w-3 h-3" />}
+                                Admission Number
+                              </div>
+                            </th>
+                            <th className="px-10 py-6 text-[9px] uppercase tracking-wider text-slate-500 font-bold">Student Identity</th>
+                            <th className="px-10 py-6 text-[9px] uppercase tracking-wider text-slate-500 font-bold">Obtained</th>
+                            <th className="px-10 py-6 text-[9px] uppercase tracking-wider text-slate-500 font-bold">Total</th>
+                            <th className="px-10 py-6 text-[9px] uppercase tracking-wider text-slate-500 font-bold text-right">Performance Index</th>
+                         </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800/50">
+                         {sortedExamResults.map((res, i) => {
+                           const student = classStudents.find(s => s.id === res.student_id) || searchResults.find(s => s.id === res.student_id);
+                           const percent = (res.obtained_marks / res.total_marks) * 100;
+                           return (
+                             <tr key={`award-list-row-${i}`} className="hover:bg-emerald-500/5 transition-all group">
+                                <td className="px-10 py-6 font-mono text-[10px] text-slate-500 tracking-widest">{student?.admission_no || `ID-${res.student_id}`}</td>
+                                <td className="px-10 py-6">
+                                   <p className="text-[10px] font-bold text-slate-900 dark:text-white uppercase tracking-widest group-hover:text-emerald-500 transition-colors">{student?.name || 'Academic Record'}</p>
+                                </td>
+                                <td className="px-10 py-6 text-[11px] font-bold text-emerald-500">{res.obtained_marks}</td>
+                                <td className="px-10 py-6 text-[11px] font-bold text-slate-400">{res.total_marks}</td>
+                                <td className="px-10 py-6 text-right">
+                                   <div className={`inline-flex items-center gap-2 px-4 py-1.5 rounded-full border font-bold text-[9px] uppercase tracking-widest ${res.obtained_marks >= res.passing_marks ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20' : 'bg-rose-500/10 text-rose-500 border-rose-500/20'}`}>
+                                      {res.obtained_marks >= res.passing_marks ? 'SUCCESS' : 'FAILURE'} — {Math.round(percent)}%
+                                   </div>
+                                </td>
+                             </tr>
+                           );
+                         })}
+                      </tbody>
+                   </table>
+                </div>
+                {examResults.length === 0 && (
+                   <div className="py-24 text-center">
+                      <p className="text-[9px] text-slate-500 uppercase tracking-widest">No award list generated for active parameters</p>
+                   </div>
+                )}
+             </div>
+          </motion.div>
+        )}
+
+        {activeTab === 'enrolments' && (
+          <motion.div key="enrolments" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-6 pb-20">
+            <div className="flex items-center justify-between">
+               <h3 className="text-xl font-light uppercase tracking-[0.2em] text-slate-900 dark:text-white">Student Enrolment Portal</h3>
+               <div className="flex gap-3">
+                 <button 
+                  onClick={() => setShowEnrolmentForm(!showEnrolmentForm)}
+                  className="bg-emerald-500/10 border border-emerald-500/20 text-emerald-500 px-6 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-emerald-500 hover:text-white transition-all shadow-sm"
+                 >
+                   {showEnrolmentForm ? 'Cancel Enrol' : 'New Enrolment'}
+                 </button>
+                 <button 
+                  onClick={fetchEnrolmentReport}
+                  className="bg-[#10b981] text-[#020617] px-6 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-[#059669] transition-all shadow-lg"
+                 >
+                   Generate Analysis
+                 </button>
+               </div>
+            </div>
+
+            {showEnrolmentForm && (
+              <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} className="overflow-hidden">
+                <form onSubmit={handleEnrollStudent} className="space-y-6 mb-12">
+                  <div className="bg-card border border-emerald-500/20 p-8 rounded-3xl shadow-xl space-y-6">
+                    <h4 className="text-sm font-bold uppercase tracking-widest text-[#10b981] mb-2">Student Registration Terminal</h4>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1">Student Name</label>
+                        <input 
+                          type="text" required
+                          value={enrollForm.name}
+                          onChange={(e) => setEnrollForm({...enrollForm, name: e.target.value})}
+                          className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none transition-all shadow-sm"
+                          placeholder="Full legal name"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1">Admission No</label>
+                        <input 
+                          type="text" required
+                          value={enrollForm.admission_no}
+                          onChange={(e) => setEnrollForm({...enrollForm, admission_no: e.target.value})}
+                          className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none transition-all shadow-sm font-mono"
+                          placeholder="ADM-2024-XX"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1">Gender</label>
+                        <select 
+                          value={enrollForm.gender}
+                          onChange={(e) => setEnrollForm({...enrollForm, gender: e.target.value})}
+                          className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none transition-all shadow-sm"
+                        >
+                          <option value="MALE">MALE</option>
+                          <option value="FEMALE">FEMALE</option>
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1">Date of Birth</label>
+                        <input 
+                          type="date" required
+                          value={enrollForm.dob}
+                          onChange={(e) => setEnrollForm({...enrollForm, dob: e.target.value})}
+                          className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none transition-all shadow-sm"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1">Guardian Name</label>
+                        <input 
+                          type="text" required
+                          value={enrollForm.father_name}
+                          onChange={(e) => setEnrollForm({...enrollForm, father_name: e.target.value})}
+                          className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none transition-all shadow-sm"
+                          placeholder="Father/Guardian Name"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1">Mobile No</label>
+                        <input 
+                          type="tel" required
+                          value={enrollForm.father_mobile}
+                          onChange={(e) => setEnrollForm({...enrollForm, father_mobile: e.target.value})}
+                          className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none transition-all shadow-sm font-mono"
+                          placeholder="03XX-XXXXXXX"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1">Class Segment</label>
+                        <select 
+                          value={enrollForm.class_id}
+                          onChange={(e) => setEnrollForm({...enrollForm, class_id: e.target.value})}
+                          className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none transition-all shadow-sm"
+                        >
+                          <option value="">Choose Class</option>
+                          {allClasses.map(c => <option key={`adm-en-cls-form-${c.id}`} value={c.id}>{c.class_name}</option>)}
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1">Section</label>
+                        <select 
+                          value={enrollForm.section_id}
+                          onChange={(e) => setEnrollForm({...enrollForm, section_id: e.target.value})}
+                          className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none transition-all shadow-sm"
+                        >
+                          <option value="">Main/General</option>
+                          {sections.map(s => <option key={`adm-en-sect-form-${s.id}`} value={s.id}>{s.section_name}</option>)}
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1">Enrolment Type</label>
+                        <select 
+                          value={enrollForm.enrollment_type}
+                          onChange={(e) => setEnrollForm({...enrollForm, enrollment_type: e.target.value as any})}
+                          className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none transition-all shadow-sm"
+                        >
+                          <option value="Fresh">Fresh</option>
+                          <option value="Public">Public Transfer</option>
+                          <option value="Private">Private Transfer</option>
+                          <option value="Dropout">Dropout</option>
+                        </select>
+                      </div>
+                    </div>
+                    <button 
+                      type="submit" 
+                      disabled={isEnrolling}
+                      className="w-full py-4 bg-emerald-500 text-slate-900 font-bold uppercase tracking-widest text-[10px] rounded-xl hover:shadow-xl transition-all disabled:opacity-50"
+                    >
+                      {isEnrolling ? 'Processing Registration...' : 'Authorize Enrolment'}
+                    </button>
+                  </div>
+                </form>
+              </motion.div>
+            )}
+
+            <div className="bg-card border border-border p-6 rounded-2xl shadow-sm">
+               <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                  <div className="space-y-1">
+                    <label className="text-[9px] uppercase tracking-widest text-slate-500 font-bold">Start Date</label>
+                    <input 
+                      type="date" 
+                      value={enrolmentFilters.startDate}
+                      onChange={(e) => setEnrolmentFilters({...enrolmentFilters, startDate: e.target.value})}
+                      className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-900 dark:text-white outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[9px] uppercase tracking-widest text-slate-500 font-bold">End Date</label>
+                    <input 
+                      type="date" 
+                      value={enrolmentFilters.endDate}
+                      onChange={(e) => setEnrolmentFilters({...enrolmentFilters, endDate: e.target.value})}
+                      className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-900 dark:text-white outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[9px] uppercase tracking-widest text-slate-500 font-bold">Class</label>
+                    <select 
+                      value={enrolmentFilters.classId}
+                      onChange={(e) => setEnrolmentFilters({...enrolmentFilters, classId: e.target.value})}
+                      className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-900 dark:text-white outline-none focus:border-emerald-500 font-mono"
+                    >
+                      <option value="">All Classes</option>
+                      {allClasses.map(c => <option key={`adm-enf-cls-${c.id}`} value={c.id}>{c.class_name}</option>)}
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[9px] uppercase tracking-widest text-slate-500 font-bold">Type</label>
+                    <select 
+                      value={enrolmentFilters.type}
+                      onChange={(e) => setEnrolmentFilters({...enrolmentFilters, type: e.target.value})}
+                      className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-900 dark:text-white outline-none focus:border-emerald-500"
+                    >
+                      <option value="">All Types</option>
+                      <option value="Fresh">Fresh Session</option>
+                      <option value="Public">Public Transfer</option>
+                      <option value="Private">Private Transfer</option>
+                      <option value="Dropout">Dropout Re-entry</option>
+                    </select>
+                  </div>
+               </div>
+            </div>
+
+            <div className="bg-card border border-border rounded-2xl overflow-hidden shadow-sm">
+                <div className="p-6 border-b border-border bg-slate-50 dark:bg-[#020617]/50 flex justify-between items-center">
+                   <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Enrolment List</h4>
+                   <span className="text-[10px] font-mono text-[#10b981] bg-[#10b981]/10 px-2 py-0.5 rounded">{enrolmentLogs.length} Records Found</span>
+                </div>
+                <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse">
+                        <thead>
+                            <tr className="bg-slate-50 dark:bg-[#020617]/30 border-b border-border">
+                                <th className="px-6 py-4 text-[9px] font-bold uppercase tracking-widest text-slate-400">Student Info</th>
+                                <th className="px-6 py-4 text-[9px] font-bold uppercase tracking-widest text-slate-400 text-center">Gender</th>
+                                <th className="px-6 py-4 text-[9px] font-bold uppercase tracking-widest text-slate-400">Class/Sect</th>
+                                <th className="px-6 py-4 text-[9px] font-bold uppercase tracking-widest text-slate-400">Type</th>
+                                <th className="px-6 py-4 text-[9px] font-bold uppercase tracking-widest text-slate-400">Date</th>
+                                <th className="px-6 py-4 text-[9px] font-bold uppercase tracking-widest text-slate-400">Guardian</th>
+                                <th className="px-6 py-4 text-[9px] font-bold uppercase tracking-widest text-slate-400 text-right">Manage</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-border">
+                            {enrolmentLogs.map((log) => (
+                                <tr key={`adm-en-log-${log.id}`} className="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors group/row">
+                                    <td className="px-6 py-4">
+                                        <div className="flex items-center gap-3">
+                                            <div className="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-[10px] font-bold text-slate-400">
+                                                {(log.name || 'A').charAt(0)}
+                                            </div>
+                                            <div>
+                                                <p className="text-xs font-bold text-slate-900 dark:text-white uppercase tracking-tight">{log.name}</p>
+                                                <p className="text-[9px] text-slate-500 font-mono">ADM: {log.admission_no}</p>
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td className="px-6 py-4 text-center">
+                                       <span className={`text-[9px] font-bold uppercase px-2 py-0.5 rounded ${log.gender === 'MALE' ? 'text-blue-500' : 'text-pink-500'}`}>
+                                          {log.gender || 'Unknown'}
+                                       </span>
+                                    </td>
+                                    <td className="px-6 py-4">
+                                        <p className="text-xs text-slate-600 dark:text-slate-400 font-medium">
+                                            {allClasses.find(c => c.id === log.class_id)?.class_name || 'N/A'}
+                                        </p>
+                                        <p className="text-[9px] text-slate-500 font-mono">
+                                            {sections.find(s => s.id === log.section_id)?.section_name ? `Section ${sections.find(s => s.id === log.section_id)?.section_name}` : 'No Section'}
+                                        </p>
+                                    </td>
+                                    <td className="px-6 py-4">
+                                        <div>
+                                          <span className={`text-[8px] font-bold uppercase px-2 py-1 rounded-full ${
+                                              log.enrollment_type === 'Fresh' ? 'bg-emerald-500/10 text-emerald-500' :
+                                              log.enrollment_type === 'Public' ? 'bg-blue-500/10 text-blue-500' :
+                                              log.enrollment_type === 'Private' ? 'bg-purple-500/10 text-purple-500' :
+                                              'bg-rose-500/10 text-rose-500'
+                                          }`}>
+                                              {log.enrollment_type}
+                                          </span>
+                                          {log.previous_school_name && (
+                                            <div className="mt-1">
+                                              <p className="text-[9px] text-slate-500 uppercase font-bold tracking-tight line-clamp-1">{log.previous_school_name}</p>
+                                              <p className="text-[8px] text-slate-400 font-mono">EMIS: {log.previous_school_emis}</p>
+                                            </div>
+                                          )}
+                                        </div>
+                                    </td>
+                                    <td className="px-6 py-4 font-mono text-[10px] text-slate-500">
+                                        {log.class_enrolment_date}
+                                    </td>
+                                    <td className="px-6 py-4">
+                                        <p className="text-[10px] text-slate-600 dark:text-slate-400">{log.father_name}</p>
+                                        <p className="text-[9px] text-slate-400 font-mono">{log.father_mobile_no}</p>
+                                    </td>
+                                    <td className="px-6 py-4 text-right">
+                                       <div className="flex justify-end gap-1">
+                                         <button 
+                                            onClick={() => handleRemoveStudentFromClass(log.id!)}
+                                            className="p-1.5 text-slate-400 hover:text-emerald-500 hover:bg-emerald-500/10 rounded-lg transition-colors"
+                                            title="Unassign from Class"
+                                         >
+                                            <UserMinus className="w-4 h-4" />
+                                         </button>
+                                         <button 
+                                            onClick={() => handleDeleteStudent(log.id!)}
+                                            disabled={isDeleting === log.id}
+                                            className={`p-1.5 rounded-lg transition-colors ${isDeleting === log.id ? 'opacity-50 cursor-not-allowed text-rose-300' : 'text-slate-400 hover:text-rose-500 hover:bg-rose-500/10'}`}
+                                            title="Permanently Delete Records"
+                                         >
+                                            <Trash2 className="w-4 h-4" />
+                                         </button>
+                                       </div>
+                                    </td>
+                                </tr>
+                            ))}
+                            {enrolmentLogs.length === 0 && (
+                                <tr>
+                                    <td colSpan={7} className="px-6 py-12 text-center text-[10px] text-slate-500 uppercase tracking-widest italic">
+                                        No enrolment records found for the selected segment
+                                    </td>
+                                </tr>
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+          </motion.div>
+        )}
+
+        {activeTab === 'reports' && activeSubTab === 'report-student' && (
+          <motion.div key="reports-student" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-8 pb-20 text-left">
+            <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
+              <div className="space-y-1">
+                <h3 className="text-2xl font-bold tracking-[0.1em] uppercase text-slate-900 dark:text-white leading-tight">Insight Engine</h3>
+                <p className="text-[10px] text-emerald-500 uppercase tracking-widest font-bold">Comprehensive analytical terminal for {schoolName || 'Instituition'}</p>
+              </div>
+              <div className="flex bg-slate-100 dark:bg-slate-900/50 p-1.5 rounded-2xl border border-slate-200 dark:border-slate-800 backdrop-blur-md self-start">
+                {[
+                  { id: 'class-daily', label: 'Daily Pulse', icon: BarChart3 },
+                  { id: 'class-historical', label: 'Class Analytics', icon: History },
+                  { id: 'staff-logs', label: 'Staff Terminal', icon: Clock },
+                  { id: 'personal', label: 'My Performance', icon: User }
+                ].map((tab) => (
+                  <button 
+                    key={`report-tab-${tab.id}`}
+                    onClick={() => setReportSubTab(tab.id as any)}
+                    className={`flex items-center gap-2 px-5 py-2.5 text-[9px] font-bold uppercase tracking-widest rounded-xl transition-all ${reportSubTab === tab.id ? 'bg-emerald-500 text-slate-950 shadow-lg shadow-emerald-500/20' : 'text-slate-500 hover:text-slate-300'}`}
+                  >
+                    <tab.icon className="w-3.5 h-3.5" />
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {reportSubTab === 'class-daily' && (
+              <div className="space-y-6">
+                <div className="bg-card border border-slate-800 p-8 rounded-[2.5rem] shadow-2xl relative overflow-hidden group">
+                  <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-500/5 blur-[100px] -mr-32 -mt-32 rounded-full transition-all group-hover:bg-emerald-500/10" />
+                  
+                  <div className="grid md:grid-cols-2 gap-8 relative z-10">
+                    <div className="space-y-2">
+                      <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Select Division</label>
+                      <div className="relative">
+                        <div className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500">
+                          <Layers className="w-4 h-4" />
+                        </div>
+                        <select 
+                          value={selectedReportClassId || ''} 
+                          onChange={(e) => {
+                            const cid = Number(e.target.value);
+                            setSelectedReportClassId(cid);
+                            if (cid) fetchGeneralClassReport(cid, generalReportDate);
+                          }}
+                          className="w-full bg-[#020617] border border-slate-800 rounded-2xl pl-12 pr-4 py-4 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner appearance-none"
+                        >
+                          <option value="">Select Class</option>
+                          {allClasses.map(c => <option key={`report-daily-cls-${c.id}`} value={c.id}>{c.class_name}</option>)}
+                        </select>
+                        <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-slate-500">
+                          <ChevronDown className="w-4 h-4" />
+                        </div>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Snapshot Date</label>
+                      <div className="relative">
+                        <div className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500">
+                          <Calendar className="w-4 h-4" />
+                        </div>
+                        <input 
+                          type="date" 
+                          value={generalReportDate}
+                          onChange={(e) => {
+                            setGeneralReportDate(e.target.value);
+                            if (selectedReportClassId) fetchGeneralClassReport(selectedReportClassId, e.target.value);
+                          }}
+                          className="w-full bg-[#020617] border border-slate-800 rounded-2xl pl-12 pr-4 py-4 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {reportData && selectedReportClassId ? (
+                  <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
+                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-6">
+                      {[
+                        { label: 'Total Strength', val: reportData.total, icon: Users, color: 'text-white' },
+                        { label: 'Present', val: reportData.present, icon: UserCheck, color: 'text-emerald-500' },
+                        { label: 'Absent/Leave', val: reportData.absent + reportData.sick + reportData.leave, icon: UserX, color: 'text-rose-500' },
+                        { label: 'Efficiency', val: `${reportData.presentPercentage}%`, icon: Award, color: 'text-blue-500' }
+                      ].map((stat, i) => (
+                        <div key={`daily-report-stat-${i}`} className="bg-card border border-slate-800 p-6 rounded-3xl shadow-lg relative overflow-hidden">
+                           <div className="flex justify-between items-start mb-4">
+                             <div className={`p-3 rounded-2xl bg-slate-900/50 border border-slate-800 ${stat.color}`}>
+                               <stat.icon className="w-5 h-5" />
+                             </div>
+                             <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">{stat.label}</span>
+                           </div>
+                           <p className={`text-2xl font-bold ${stat.color}`}>{stat.val}</p>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="bg-card border border-slate-800 rounded-[2.5rem] overflow-hidden shadow-2xl">
+                      <div className="p-8 border-b border-slate-800 flex justify-between items-center bg-[#020617]/50">
+                        <div className="flex items-center gap-4">
+                           <div className="p-4 rounded-2xl bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
+                             <ClipboardList className="w-6 h-6" />
+                           </div>
+                           <div>
+                             <h4 className="text-lg font-bold uppercase tracking-widest text-white">{allClasses.find(c => c.id === selectedReportClassId)?.class_name}</h4>
+                             <p className="text-[10px] text-emerald-500 uppercase tracking-widest mt-0.5 font-bold">Register Summary for {generalReportDate}</p>
+                           </div>
+                        </div>
+                      </div>
+                      
+                      <div className="p-8 grid md:grid-cols-4 gap-6">
+                        {[
+                          { label: 'Present', val: reportData.present, color: 'emerald', cat: 'Present' as const },
+                          { label: 'Absent', val: reportData.absent, color: 'rose', cat: 'Absent' as const },
+                          { label: 'Sick', val: reportData.sick, color: 'amber', cat: 'Sick' as const },
+                          { label: 'Leave', val: reportData.leave, color: 'blue', cat: 'Leave' as const },
+                        ].map(item => (
+                          <button 
+                            key={`daily-cat-${item.label}`}
+                            onClick={() => setViewingCategory(viewingCategory === item.cat ? null : item.cat)}
+                            className={`group p-6 rounded-3xl border transition-all flex flex-col items-center ${viewingCategory === item.cat ? `bg-${item.color}-500/10 border-${item.color}-500/50 ring-2 ring-${item.color}-500/20` : 'bg-slate-900/20 border-slate-800 hover:border-slate-700'}`}
+                          >
+                            <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-slate-500 mb-3 group-hover:text-slate-300 transition-colors">{item.label}</p>
+                            <p className={`text-4xl font-bold text-${item.color}-500 tabular-nums`}>{item.val}</p>
+                          </button>
+                        ))}
+                      </div>
+
+                      <AnimatePresence>
+                        {viewingCategory && (
+                          <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden border-t border-slate-800 bg-[#020617]/30">
+                             <div className="p-8 space-y-6">
+                               <div className="flex items-center justify-between">
+                                 <h5 className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-400">
+                                   Detailed Index: <span className="text-white">{viewingCategory} Students</span>
+                                 </h5>
+                                 <span className="text-[9px] bg-slate-800 text-slate-400 px-3 py-1 rounded-full uppercase font-bold tracking-widest">
+                                   {reportData.categorizedStudents[viewingCategory].length} Entries
+                                 </span>
+                               </div>
+                               <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
+                                 {reportData.categorizedStudents[viewingCategory].length > 0 ? (
+                                   reportData.categorizedStudents[viewingCategory].map((s, idx) => (
+                                     <div key={`daily-st-detail-${s.id}-${idx}`} className="flex items-center gap-4 p-4 rounded-2xl bg-slate-900/50 border border-slate-800 group hover:border-emerald-500/30 transition-all">
+                                        <div className="w-10 h-10 rounded-xl bg-slate-800 flex items-center justify-center text-emerald-500 group-hover:bg-emerald-500 group-hover:text-slate-900 transition-all font-bold">
+                                          {s.name?.charAt(0)}
+                                        </div>
+                                        <div className="min-w-0">
+                                          <p className="text-xs font-bold text-white uppercase truncate tracking-widest">{s.name}</p>
+                                          <p className="text-[9px] text-slate-500 font-mono tracking-widest mt-1">ID: {s.admission_no}</p>
+                                        </div>
+                                     </div>
+                                   ))
+                                 ) : (
+                                   <div className="col-span-full py-12 text-center">
+                                     <p className="text-[10px] text-slate-500 italic uppercase tracking-widest">No entries found for this category on selected date.</p>
+                                   </div>
+                                 )}
+                               </div>
+                             </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  </motion.div>
+                ) : selectedReportClassId ? (
+                  <div className="py-40 text-center bg-card border border-dashed border-slate-800 rounded-[3rem] shadow-inner">
+                    <div className="w-20 h-20 bg-slate-900/50 rounded-[2rem] flex items-center justify-center mx-auto mb-6 border border-slate-800 animate-pulse">
+                       <Calendar className="w-8 h-8 text-slate-600" />
+                    </div>
+                    <h3 className="text-lg font-bold text-white uppercase tracking-[0.2em] mb-2">Null Data Point</h3>
+                    <p className="text-xs text-slate-500 uppercase tracking-widest max-w-xs mx-auto leading-relaxed">No electronic marking record exists for the selected class on {generalReportDate}.</p>
+                  </div>
+                ) : (
+                  <div className="py-40 text-center bg-card border border-dashed border-slate-800 rounded-[3rem] shadow-inner">
+                    <div className="w-20 h-20 bg-slate-900/50 rounded-[2rem] flex items-center justify-center mx-auto mb-6 border border-slate-800">
+                       <Filter className="w-8 h-8 text-slate-600" />
+                    </div>
+                    <h3 className="text-lg font-bold text-white uppercase tracking-[0.2em] mb-2">Calibration Required</h3>
+                    <p className="text-xs text-slate-500 uppercase tracking-widest max-w-xs mx-auto leading-relaxed">Please select a pedagogical division from the directory to view real-time data.</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {reportSubTab === 'class-historical' && (
+              <div className="space-y-8">
+                <div className="bg-card border border-slate-800 p-8 rounded-[2.5rem] shadow-2xl relative overflow-hidden">
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-6 relative z-10">
+                    <div className="md:col-span-1 space-y-2">
+                       <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Division</label>
+                       <select 
+                         value={historicalReportFilters.classId}
+                         onChange={(e) => setHistoricalReportFilters({...historicalReportFilters, classId: e.target.value})}
+                         className="w-full bg-[#020617] border border-slate-800 rounded-2xl px-4 py-4 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner"
+                       >
+                         <option value="">Select Class</option>
+                         {allClasses.map(c => <option key={`hist-cls-opt-${c.id}`} value={c.id}>{c.class_name}</option>)}
+                       </select>
+                    </div>
+                    <div className="space-y-2">
+                       <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Active From</label>
+                       <input 
+                         type="date"
+                         value={historicalReportFilters.startDate}
+                         onChange={(e) => setHistoricalReportFilters({...historicalReportFilters, startDate: e.target.value})}
+                         className="w-full bg-[#020617] border border-slate-800 rounded-2xl px-4 py-4 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner"
+                       />
+                    </div>
+                    <div className="space-y-2">
+                       <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Active Until</label>
+                       <input 
+                         type="date"
+                         value={historicalReportFilters.endDate}
+                         onChange={(e) => setHistoricalReportFilters({...historicalReportFilters, endDate: e.target.value})}
+                         className="w-full bg-[#020617] border border-slate-800 rounded-2xl px-4 py-4 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner"
+                       />
+                    </div>
+                    <div className="flex items-end">
+                       <button 
+                         onClick={generateHistoricalClassReport}
+                         disabled={isGeneratingHistorical}
+                         className="w-full h-[56px] bg-emerald-500 text-slate-950 font-bold uppercase tracking-widest text-[10px] rounded-2xl hover:bg-emerald-400 active:scale-[0.98] transition-all flex items-center justify-center shadow-lg shadow-emerald-500/20 disabled:opacity-50"
+                       >
+                         {isGeneratingHistorical ? 'Compiling...' : 'Run Analytics'}
+                       </button>
+                    </div>
+                  </div>
+                </div>
+
+                {historicalReportData.length > 0 ? (
+                  <div className="bg-card border border-slate-800 rounded-[2.5rem] overflow-hidden shadow-2xl">
+                    <div className="p-8 border-b border-slate-800 flex justify-between items-center bg-[#020617]/50">
+                       <div>
+                         <h4 className="text-lg font-bold uppercase tracking-widest text-white leading-tight">Aggregate Performance</h4>
+                         <p className="text-[10px] text-emerald-500 uppercase tracking-widest font-bold mt-1">Period: {historicalReportFilters.startDate} — {historicalReportFilters.endDate}</p>
+                       </div>
+                       <div className="flex gap-3">
+                         <button className="p-3 text-slate-400 bg-slate-900/50 border border-slate-800 rounded-2xl hover:text-white transition-all shadow-lg">
+                           <FileText className="w-5 h-5" />
+                         </button>
+                       </div>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse">
+                        <thead>
+                          <tr className="bg-slate-900/30">
+                            <th className="px-8 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Reference #</th>
+                            <th className="px-8 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Student Name</th>
+                            <th className="px-8 py-6 text-[10px] uppercase tracking-wider text-emerald-500 font-bold text-center">Presents</th>
+                            <th className="px-8 py-6 text-[10px] uppercase tracking-wider text-rose-500 font-bold text-center">Absents</th>
+                            <th className="px-8 py-6 text-[10px] uppercase tracking-wider text-blue-500 font-bold text-center">Leave</th>
+                            <th className="px-8 py-6 text-[10px] uppercase tracking-wider text-white font-bold text-right">Attendance Rate</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800/50">
+                          {historicalReportData.map((row, i) => (
+                            <tr key={`hist-row-${row.id}-${i}`} className="hover:bg-slate-900/20 transition-all group">
+                              <td className="px-8 py-6 text-[11px] font-mono text-slate-500 tracking-widest">{row.admission_no}</td>
+                              <td className="px-8 py-6">
+                                <span className="text-[11px] font-bold text-white uppercase tracking-widest group-hover:text-emerald-400 transition-colors">{row.name}</span>
+                              </td>
+                              <td className="px-8 py-6 text-center">
+                                <span className="text-xs font-bold text-emerald-500/80 bg-emerald-500/5 px-3 py-1.5 rounded-lg border border-emerald-500/10 tabular-nums">{row.presents}</span>
+                              </td>
+                              <td className="px-8 py-6 text-center">
+                                <span className="text-xs font-bold text-rose-500/80 bg-rose-500/5 px-3 py-1.5 rounded-lg border border-rose-500/10 tabular-nums">{row.absents}</span>
+                              </td>
+                              <td className="px-8 py-6 text-center">
+                                <span className="text-xs font-bold text-blue-500/80 bg-blue-500/5 px-3 py-1.5 rounded-lg border border-blue-500/10 tabular-nums">{row.leave}</span>
+                              </td>
+                              <td className="px-8 py-6 text-right">
+                                <div className="flex flex-col items-end gap-2">
+                                   <span className={`text-xs font-bold font-mono ${parseFloat(row.percentage) >= 75 ? 'text-emerald-500' : 'text-rose-500'}`}>{row.percentage}%</span>
+                                   <div className="w-24 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                                      <div 
+                                        className={`h-full transition-all duration-1000 ${parseFloat(row.percentage) >= 75 ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.3)]' : 'bg-rose-500'}`} 
+                                        style={{ width: `${row.percentage}%` }}
+                                      />
+                                   </div>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="py-40 text-center bg-card border border-dashed border-slate-800 rounded-[3rem] shadow-inner">
+                    <div className="w-20 h-20 bg-slate-900/50 rounded-[2rem] flex items-center justify-center mx-auto mb-6 border border-slate-800">
+                       <BarChart3 className="w-8 h-8 text-slate-600" />
+                    </div>
+                    <h3 className="text-lg font-bold text-white uppercase tracking-[0.2em] mb-2">Awaiting Computation</h3>
+                    <p className="text-xs text-slate-500 uppercase tracking-widest max-w-xs mx-auto leading-relaxed">Select specialized filters and run analytics to generate comprehensive historical reports.</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {reportSubTab === 'staff-logs' && (
+              <div className="space-y-12">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+                  {[
+                    { label: 'Total Personnel', val: todaySummary.total, color: 'white', icon: Users },
+                    { label: 'Present Today', val: todaySummary.present, color: 'emerald', icon: UserCheck },
+                    { label: 'Off-Duty/Absent', val: todaySummary.absent, color: 'rose', icon: UserX },
+                    { label: 'Active Sessions', val: todaySummary.onClock, color: 'blue', icon: Clock }
+                  ].map((stat, i) => (
+                    <div key={`staff-summary-${i}`} className="bg-card border border-slate-800 p-8 rounded-[2.5rem] shadow-lg relative overflow-hidden group">
+                      <div className="absolute top-0 right-0 p-3 text-slate-800/10 group-hover:text-emerald-500/5 transition-colors">
+                        <stat.icon className="w-16 h-16" />
+                      </div>
+                      <p className="text-[10px] text-slate-500 uppercase tracking-[0.2em] font-bold mb-4">{stat.label}</p>
+                      <p className={`text-4xl font-bold text-${stat.color}-500 tabular-nums`}>{stat.val}</p>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="bg-card border border-slate-800 p-10 rounded-[3rem] shadow-2xl space-y-8 relative overflow-hidden">
+                   <div className="flex items-center gap-4 mb-2">
+                     <div className="w-1.5 h-6 bg-emerald-500 rounded-full" />
+                     <h4 className="text-lg font-bold uppercase tracking-[0.2em] text-white">Filter Parameters</h4>
+                   </div>
+                   
+                   <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+                     <div className="space-y-3">
+                       <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Faculty Member</label>
+                       <select 
+                         value={reportFilters.teacherId}
+                         onChange={(e) => setReportFilters({...reportFilters, teacherId: e.target.value})}
+                         className="w-full bg-[#020617] border border-slate-800 rounded-2xl px-5 py-4 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner"
+                       >
+                         <option value="">Full Directory</option>
+                         {teachers.map((t, i) => <option key={`staff-opt-${t.id || i}`} value={t.id}>{t.name}</option>)}
+                       </select>
+                     </div>
+                     <div className="space-y-3">
+                       <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Start Cycle</label>
+                       <input 
+                         type="date"
+                         value={reportFilters.startDate}
+                         onChange={(e) => setReportFilters({...reportFilters, startDate: e.target.value})}
+                         className="w-full bg-[#020617] border border-slate-800 rounded-2xl px-5 py-4 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner"
+                       />
+                     </div>
+                     <div className="space-y-3">
+                       <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">End Cycle</label>
+                       <input 
+                         type="date"
+                         value={reportFilters.endDate}
+                         onChange={(e) => setReportFilters({...reportFilters, endDate: e.target.value})}
+                         className="w-full bg-[#020617] border border-slate-800 rounded-2xl px-5 py-4 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner"
+                       />
+                     </div>
+                   </div>
+                   <button 
+                     onClick={generateTeacherReport}
+                     className="w-full py-5 bg-emerald-500 text-slate-950 font-bold uppercase tracking-[0.3em] text-[10px] rounded-[2rem] hover:bg-emerald-400 hover:scale-[1.01] active:scale-[0.99] transition-all shadow-xl shadow-emerald-500/20"
+                   >
+                     Initialize Log Synthesis
+                   </button>
+                </div>
+
+                {teacherAttendanceLogs.length > 0 ? (
+                  <div className="bg-card border border-slate-800 rounded-[3rem] overflow-hidden shadow-2xl">
+                    <div className="p-10 border-b border-slate-800 bg-[#020617]/50 flex justify-between items-center">
+                       <div className="flex items-center gap-5">
+                         <div className="p-4 rounded-2xl bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
+                            <History className="w-6 h-6" />
+                         </div>
+                         <div>
+                           <h4 className="text-xl font-bold uppercase tracking-widest text-white leading-tight">Faculty Terminal Logs</h4>
+                           <p className="text-[10px] text-emerald-500 uppercase tracking-widest font-bold mt-1">{teacherAttendanceLogs.length} Validated Records Found</p>
+                         </div>
+                       </div>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse">
+                        <thead>
+                          <tr className="bg-slate-900/30">
+                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Cycle Date</th>
+                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Officer Profile</th>
+                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Check-In</th>
+                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Check-Out</th>
+                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-emerald-500 font-bold">Session Delta</th>
+                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Verification</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800/50">
+                          {teacherAttendanceLogs.map((log, i) => {
+                            const teacher = teachers.find(t => t.id === log.teacher_id);
+                            return (
+                              <tr key={`staff-log-${log.id || i}`} className="hover:bg-slate-900/20 transition-all group">
+                                <td className="px-10 py-8 text-[11px] font-mono text-slate-500 uppercase tracking-widest">{log.attendance_date}</td>
+                                <td className="px-10 py-8">
+                                  <div className="flex items-center gap-4">
+                                     <div className="w-10 h-10 rounded-xl bg-slate-800 flex items-center justify-center text-emerald-500 font-bold border border-slate-700 group-hover:border-emerald-500 transition-all">
+                                       {teacher?.name?.charAt(0) || '?'}
+                                     </div>
+                                     <div>
+                                       <p className="text-[11px] font-bold text-white uppercase tracking-widest leading-none mb-1.5">{teacher?.name || 'Unknown User'}</p>
+                                       <p className="text-[9px] text-slate-500 uppercase font-bold tracking-tighter">{teacher?.designation || 'Staff'}</p>
+                                     </div>
+                                  </div>
+                                </td>
+                                <td className="px-10 py-8 text-[11px] font-mono text-slate-400">{log.check_in || '--:--:--'}</td>
+                                <td className="px-10 py-8 text-[11px] font-mono text-slate-400">{log.check_out || 'Active Session'}</td>
+                                <td className="px-10 py-8 text-[11px] font-bold text-emerald-400 font-mono tracking-tighter">{log.duration || '00:00'}</td>
+                                <td className="px-10 py-8">
+                                  <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border font-bold text-[9px] uppercase tracking-widest ${log.status === 'Present' ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20' : 'bg-slate-800 text-slate-500 border-slate-700'}`}>
+                                    <div className={`w-1.5 h-1.5 rounded-full ${log.status === 'Present' ? 'bg-emerald-500 animate-pulse' : 'bg-slate-600'}`} />
+                                    {log.status}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="py-40 text-center bg-card border border-dashed border-slate-800 rounded-[3rem] shadow-inner">
+                    <div className="w-20 h-20 bg-slate-900/50 rounded-[2rem] flex items-center justify-center mx-auto mb-6 border border-slate-800">
+                       <Clock className="w-8 h-8 text-slate-600" />
+                    </div>
+                    <h3 className="text-lg font-bold text-white uppercase tracking-[0.2em] mb-2">No Verified Logs</h3>
+                    <p className="text-xs text-slate-500 uppercase tracking-widest max-w-xs mx-auto leading-relaxed">System scan complete. No logs matching the active filter parameters were located in the secure database.</p>
+                  </div>
+                )}
+                </div>
+              )}
+
+            {reportSubTab === 'staff-logs' && (
+              <div className="space-y-6">
+                <div className="bg-card border border-slate-800 p-8 rounded-[2.5rem] shadow-2xl relative overflow-hidden group">
+                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 relative z-10">
+                     <div className="space-y-3">
+                       <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Officer Selection</label>
+                       <select 
+                         value={reportFilters.teacherId}
+                         onChange={(e) => setReportFilters({...reportFilters, teacherId: e.target.value})}
+                         className="w-full bg-[#020617] border border-slate-800 rounded-2xl px-5 py-4 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner"
+                       >
+                         <option value="">Select Staff Member</option>
+                         {teachers.map(t => <option key={`log-t-${t.id}`} value={t.id}>{t.name}</option>)}
+                       </select>
+                     </div>
+                     <div className="space-y-3">
+                       <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Start Cycle</label>
+                       <input 
+                         type="date"
+                         value={reportFilters.startDate}
+                         onChange={(e) => setReportFilters({...reportFilters, startDate: e.target.value})}
+                         className="w-full bg-[#020617] border border-slate-800 rounded-2xl px-5 py-4 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner"
+                       />
+                     </div>
+                     <div className="space-y-3">
+                       <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">End Cycle</label>
+                       <input 
+                         type="date"
+                         value={reportFilters.endDate}
+                         onChange={(e) => setReportFilters({...reportFilters, endDate: e.target.value})}
+                         className="w-full bg-[#020617] border border-slate-800 rounded-2xl px-5 py-4 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner"
+                       />
+                     </div>
+                   </div>
+                   <button 
+                     onClick={generateTeacherReport}
+                     className="w-full py-5 bg-emerald-500 text-slate-950 font-bold uppercase tracking-[0.3em] text-[10px] rounded-[2rem] hover:bg-emerald-400 hover:scale-[1.01] active:scale-[0.99] transition-all shadow-xl shadow-emerald-500/20 mt-8"
+                   >
+                     Initialize Log Synthesis
+                   </button>
+                </div>
+
+                {teacherAttendanceLogs.length > 0 ? (
+                  <div className="bg-card border border-slate-800 rounded-[3rem] overflow-hidden shadow-2xl">
+                    <div className="p-10 border-b border-slate-800 bg-[#020617]/50 flex justify-between items-center">
+                       <div className="flex items-center gap-5">
+                         <div className="p-4 rounded-2xl bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
+                            <History className="w-6 h-6" />
+                         </div>
+                         <div>
+                           <h4 className="text-xl font-bold uppercase tracking-widest text-white leading-tight">Faculty Terminal Logs</h4>
+                           <p className="text-[10px] text-emerald-500 uppercase tracking-widest font-bold mt-1">{teacherAttendanceLogs.length} Validated Records Found</p>
+                         </div>
+                       </div>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse">
+                        <thead>
+                          <tr className="bg-slate-900/30">
+                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Cycle Date</th>
+                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Officer Profile</th>
+                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Check-In</th>
+                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Check-Out</th>
+                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-emerald-500 font-bold">Session Delta</th>
+                            <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Verification</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800/50">
+                          {teacherAttendanceLogs.map((log, i) => {
+                            const teacher = teachers.find(t => t.id === log.teacher_id);
+                            return (
+                              <tr key={`staff-log-${log.id || i}`} className="hover:bg-slate-900/20 transition-all group">
+                                <td className="px-10 py-8 text-[11px] font-mono text-slate-500 uppercase tracking-widest">{log.attendance_date}</td>
+                                <td className="px-10 py-8">
+                                  <div className="flex items-center gap-4">
+                                     <div className="w-10 h-10 rounded-xl bg-slate-800 flex items-center justify-center text-emerald-500 font-bold border border-slate-700 group-hover:border-emerald-500 transition-all">
+                                       {teacher?.name?.charAt(0) || '?'}
+                                     </div>
+                                     <div>
+                                       <p className="text-[11px] font-bold text-white uppercase tracking-widest leading-none mb-1.5">{teacher?.name || 'Unknown User'}</p>
+                                       <p className="text-[9px] text-slate-500 uppercase font-bold tracking-tighter">{teacher?.designation || 'Staff'}</p>
+                                     </div>
+                                  </div>
+                                </td>
+                                <td className="px-10 py-8 text-[11px] font-mono text-slate-400">{log.check_in || '--:--:--'}</td>
+                                <td className="px-10 py-8 text-[11px] font-mono text-slate-400">{log.check_out || 'Active Session'}</td>
+                                <td className="px-10 py-8 text-[11px] font-bold text-emerald-400 font-mono tracking-tighter">{log.duration || '00:00'}</td>
+                                <td className="px-10 py-8">
+                                  <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border font-bold text-[9px] uppercase tracking-widest ${log.status === 'Present' ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20' : 'bg-slate-800 text-slate-500 border-slate-700'}`}>
+                                    <div className={`w-1.5 h-1.5 rounded-full ${log.status === 'Present' ? 'bg-emerald-500 animate-pulse' : 'bg-slate-600'}`} />
+                                    {log.status}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="py-40 text-center bg-card border border-dashed border-slate-800 rounded-[3rem] shadow-inner">
+                    <div className="w-20 h-20 bg-slate-900/50 rounded-[2rem] flex items-center justify-center mx-auto mb-6 border border-slate-800">
+                       <Clock className="w-8 h-8 text-slate-600" />
+                    </div>
+                    <h3 className="text-lg font-bold text-white uppercase tracking-[0.2em] mb-2">No Verified Logs</h3>
+                    <p className="text-xs text-slate-500 uppercase tracking-widest max-w-xs mx-auto leading-relaxed">System scan complete. No logs matching the active filter parameters were located in the secure database.</p>
+                  </div>
+                )}
+              </div>
+            )}
+            
+            {/* Note: 'personal' subtab content was moved to the main report-personal subtab level */}
+          </motion.div>
+        )}
+
+        {activeTab === 'reports' && activeSubTab === 'report-personal' && (
+          <motion.div key="report-personal" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-8">
+                <div className="bg-card border border-slate-800 p-8 rounded-[2.5rem] shadow-2xl flex flex-col md:flex-row justify-between items-center gap-6">
+                   <div>
+                     <h4 className="text-xl font-bold uppercase tracking-widest text-white">Personnel Attendance Inventory</h4>
+                     <p className="text-[10px] text-emerald-500 uppercase tracking-widest font-bold mt-1">Verified Log Repository for {user.name}</p>
+                   </div>
+                   <div className="flex gap-4">
+                      <div className="bg-slate-900/50 border border-slate-800 px-6 py-3 rounded-2xl">
+                         <p className="text-[8px] text-slate-500 uppercase tracking-widest mb-1">Total Logs</p>
+                         <p className="text-lg font-bold text-white font-mono">{teacherLogs.length}</p>
+                      </div>
+                      <div className="bg-emerald-500/10 border border-emerald-500/20 px-6 py-3 rounded-2xl shadow-lg">
+                         <p className="text-[8px] text-emerald-500 uppercase tracking-widest mb-1">Status</p>
+                         <p className="text-lg font-bold text-emerald-500 font-mono">Verified</p>
+                      </div>
+                   </div>
+                </div>
+
+                <div className="bg-card border border-slate-800 rounded-[3rem] overflow-hidden shadow-2xl">
+                   <div className="overflow-x-auto">
+                      <table className="w-full text-left">
+                         <thead>
+                            <tr className="bg-slate-900/30">
+                               <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Terminal Date</th>
+                               <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">In-Time</th>
+                               <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Out-Time</th>
+                               <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-slate-500 font-bold">Log Duration</th>
+                               <th className="px-10 py-6 text-[10px] uppercase tracking-wider text-emerald-500 font-bold text-right">Verification</th>
+                            </tr>
+                         </thead>
+                         <tbody className="divide-y divide-slate-800/50">
+                            {teacherLogs.map((log, i) => (
+                               <tr key={`personal-log-${i}`} className="hover:bg-emerald-500/[0.02] transition-colors">
+                                  <td className="px-10 py-8 text-[11px] font-mono text-slate-400 uppercase tracking-widest">{log.attendance_date}</td>
+                                  <td className="px-10 py-8 text-[11px] font-mono text-white">{log.check_in || '--:--:--'}</td>
+                                  <td className="px-10 py-8 text-[11px] font-mono text-white">{log.check_out || 'Active Session'}</td>
+                                  <td className="px-10 py-8 text-[11px] font-mono text-emerald-500 font-bold">{log.duration || '00:00'}</td>
+                                  <td className="px-10 py-8 text-right">
+                                     <span className="text-[9px] font-bold uppercase py-1.5 px-4 bg-emerald-500/10 text-emerald-500 rounded-lg border border-emerald-500/20 shadow-sm">
+                                        PRESENT
+                                     </span>
+                                  </td>
+                               </tr>
+                            ))}
+                         </tbody>
+                      </table>
+                   </div>
+                </div>
+          </motion.div>
+        )}
+        {activeTab === 'settings' && (
+          <motion.div key="settings" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-6 pb-20">
+            <h3 className="text-xl font-light uppercase tracking-[0.2em] text-slate-900 dark:text-white">System Configuration</h3>
+            
+            <div className="grid lg:grid-cols-2 gap-8">
+              {/* Theme Selection */}
+              <div className="bg-card border border-border p-8 rounded-3xl space-y-6">
+                <div>
+                  <h4 className="text-sm font-bold uppercase tracking-widest text-emerald-400 dark:text-emerald-400 mb-1">Visual Theme</h4>
+                  <p className="text-[10px] text-slate-500 dark:text-slate-500 uppercase tracking-widest">Select your preferred interface style</p>
+                </div>
+                
+                <div className="grid grid-cols-2 gap-4">
+                  <button 
+                    onClick={() => theme !== 'dark' && toggleTheme()}
+                    className={`flex flex-col items-center gap-3 p-6 rounded-2xl border transition-all ${theme === 'dark' ? 'bg-[#020617] border-emerald-500 text-emerald-500' : 'bg-slate-50 dark:bg-slate-900/40 border-slate-200 dark:border-slate-800 text-slate-400 dark:text-slate-500'}`}
+                  >
+                    <div className="w-10 h-10 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center">
+                       <Shield className="w-5 h-5 text-[#10b981]" />
+                    </div>
+                    <span className="text-[10px] font-bold uppercase tracking-widest">Dark (Current)</span>
+                  </button>
+
+                  <button 
+                    onClick={() => theme !== 'light' && toggleTheme()}
+                    className={`flex flex-col items-center gap-3 p-6 rounded-2xl border transition-all ${theme === 'light' ? 'bg-white border-emerald-500 text-emerald-500 shadow-xl' : 'bg-slate-50 dark:bg-slate-100/40 border-slate-200 dark:border-slate-200 text-slate-400 dark:text-slate-400'}`}
+                  >
+                    <div className="w-10 h-10 rounded-full bg-slate-100 dark:bg-slate-200 flex items-center justify-center">
+                       <Shield className="w-5 h-5 text-slate-400 dark:text-slate-500" />
+                    </div>
+                    <span className="text-[10px] font-bold uppercase tracking-widest">Light (Modern)</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Assignment Form (Moved existing one here or just update below) */}
+                <div className="bg-card border border-border p-8 rounded-3xl space-y-6 shadow-xl transition-colors duration-500">
+                  <div>
+                    <h4 className="text-sm font-bold uppercase tracking-widest text-[#10b981] mb-1">New Assignment</h4>
+                    <p className="text-[10px] text-slate-500 uppercase tracking-widest">Assign a teacher to a class/lab</p>
+                  </div>
+                  
+                  <form 
+                    onSubmit={async (e) => {
+                      e.preventDefault();
+                      const form = e.currentTarget;
+                      const formData = new FormData(form);
+                      const assignment = {
+                        teacher_id: Number(formData.get('teacher_id')),
+                        class_id: Number(formData.get('class_id')),
+                        section_id: formData.get('section_id') ? Number(formData.get('section_id')) : null,
+                        from_date: formData.get('from_date') as string,
+                        to_date: formData.get('to_date') as string,
+                        period: '1st',
+                        emis: user.emis
+                      };
+
+                      try {
+                        const { data, error } = await supabase
+                          .from('teacher_class_assignment')
+                          .insert([{ 
+                            ...assignment, 
+                            id: Math.floor(Math.random() * 2147483647) 
+                          }])
+                          .select();
+                        
+                        if (error) throw error;
+                        if (data) setAssignments([...assignments, ...data]);
+                        form.reset();
+                      } catch (err) {
+                        console.error('Error saving assignment:', err);
+                        // Mock implementation
+                        if (!import.meta.env.VITE_SUPABASE_URL) {
+                          setAssignments([...assignments, { ...assignment, id: Date.now() } as TeacherClassAssignment]);
+                          form.reset();
+                        }
+                      }
+                    }}
+                    className="space-y-4"
+                  >
+                    <div className="space-y-1">
+                      <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1">Select Teacher</label>
+                      <select name="teacher_id" required className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none transition-all shadow-sm">
+                        <option value="" className="text-slate-900 dark:text-white">Teacher Account</option>
+                        {teachers.map((t, i) => <option key={`admin-assign-teacher-opt-${t.id || `idx-${i}`}`} value={t.id} className="bg-white dark:bg-[#020617] text-slate-900 dark:text-white">{t.name} ({t.designation})</option>)}
+                      </select>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1">Select Class</label>
+                        <select name="class_id" required className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none transition-all shadow-sm">
+                          <option value="" className="text-slate-900 dark:text-white">Class</option>
+                          {allClasses.map((c, i) => <option key={`admin-assign-class-opt-${c.id || `idx-${i}`}`} value={c.id} className="bg-white dark:bg-[#020617] text-slate-900 dark:text-white">{c.class_name}</option>)}
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1">Select Section</label>
+                        <select name="section_id" className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none transition-all shadow-sm">
+                          <option value="" className="text-slate-900 dark:text-white">Section (Optional)</option>
+                          {sections.map((s, i) => <option key={`admin-assign-section-opt-${s.id || `idx-${i}`}`} value={s.id} className="bg-white dark:bg-[#020617] text-slate-900 dark:text-white">{s.section_name}</option>)}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1">From Date</label>
+                        <input type="date" name="from_date" required className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none transition-all shadow-sm" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1">To Date</label>
+                        <input type="date" name="to_date" required className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none transition-all shadow-sm" />
+                       </div>
+                    </div>
+
+                    <button type="submit" className="w-full py-4 bg-[#10b981] text-[#020617] font-bold uppercase tracking-widest text-[10px] rounded-xl hover:shadow-[0_4px_20px_rgba(16,185,129,0.3)] transition-all">
+                      Create Assignment
+                    </button>
+                  </form>
+                </div>
+
+                {/* Assignment List */}
+                <div className="bg-white dark:bg-[#0f172a] border border-slate-200 dark:border-slate-800 p-8 rounded-3xl overflow-hidden flex flex-col max-h-[500px] shadow-xl">
+                  <div className="mb-6">
+                    <h4 className="text-sm font-bold uppercase tracking-widest text-[#10b981] mb-1">Active Assignments</h4>
+                    <p className="text-[10px] text-slate-500 dark:text-slate-500 uppercase tracking-widest">{assignments.length} total links</p>
+                  </div>
+                  
+                  <div className="flex-1 overflow-y-auto space-y-3 pr-2 custom-scrollbar">
+                    {assignments.map((assignment, i) => {
+                      const teacher = teachers.find(t => t.id === assignment.teacher_id);
+                      const cls = allClasses.find(c => c.id === assignment.class_id);
+                      const sect = sections.find(s => s.id === assignment.section_id);
+                      return (
+                        <div key={`admin-assignment-list-row-${assignment.id || `idx-${i}`}`} className="bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 p-4 rounded-2xl flex items-center justify-between shadow-sm">
+                          <div>
+                            <p className="text-xs font-bold text-slate-900 dark:text-white uppercase">{teacher?.name || 'Unknown'}</p>
+                            <p className="text-[9px] text-[#10b981] uppercase tracking-widest mt-1 font-mono">
+                              {cls?.class_name || 'Deleted Class'} {sect ? `(Sec ${sect.section_name})` : ''}
+                            </p>
+                            <p className="text-[8px] text-slate-500 dark:text-slate-600 mt-0.5">
+                              {assignment.from_date} to {assignment.to_date}
+                            </p>
+                          </div>
+                          <button 
+                            onClick={async () => {
+                              try {
+                                const { error } = await supabase
+                                  .from('teacher_class_assignment')
+                                  .delete()
+                                  .eq('id', assignment.id);
+                                if (error) throw error;
+                                setAssignments(assignments.filter(a => a.id !== assignment.id));
+                              } catch (err) {
+                                console.error('Error deleting:', err);
+                                if (!import.meta.env.VITE_SUPABASE_URL) {
+                                  setAssignments(assignments.filter(a => a.id !== assignment.id));
+                                }
+                              }
+                            }}
+                            className="p-2 bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white rounded-lg transition-all"
+                          >
+                            <UserMinus className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Change Password Section */}
+                <div className="bg-card border border-border p-8 rounded-3xl space-y-6 shadow-xl transition-all hover:border-emerald-500/20">
+                  <div>
+                    <h4 className="text-sm font-bold uppercase tracking-widest text-[#10b981] mb-1">Security Update</h4>
+                    <p className="text-[10px] text-slate-500 uppercase tracking-widest">Update your system access credentials</p>
+                  </div>
+
+                  <form onSubmit={handlePasswordChange} className="space-y-4">
+                    <div className="space-y-1">
+                      <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1">Current Password</label>
+                      <input 
+                        type="password" 
+                        required
+                        value={passwordForm.currentPassword}
+                        onChange={(e) => setPasswordForm({...passwordForm, currentPassword: e.target.value})}
+                        className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none transition-all shadow-sm"
+                        placeholder="••••••••"
+                      />
+                    </div>
+                    
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1">New Password</label>
+                        <input 
+                          type="password" 
+                          required
+                          value={passwordForm.newPassword}
+                          onChange={(e) => setPasswordForm({...passwordForm, newPassword: e.target.value})}
+                          className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none transition-all shadow-sm"
+                          placeholder="Min 6 characters"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1">Confirm New</label>
+                        <input 
+                          type="password" 
+                          required
+                          value={passwordForm.confirmPassword}
+                          onChange={(e) => setPasswordForm({...passwordForm, confirmPassword: e.target.value})}
+                          className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-900 dark:text-white focus:border-emerald-500 outline-none transition-all shadow-sm"
+                          placeholder="Repeat password"
+                        />
+                      </div>
+                    </div>
+
+                    <button 
+                      type="submit" 
+                      disabled={isUpdatingPassword}
+                      className="w-full py-4 bg-[#10b981] text-[#020617] font-bold uppercase tracking-widest text-[10px] rounded-xl hover:shadow-[0_4px_20px_rgba(16,185,129,0.3)] transition-all disabled:opacity-50"
+                    >
+                      {isUpdatingPassword ? 'Hashing & Updating...' : 'Update Password'}
+                    </button>
+                  </form>
+                </div>
+            </div>
+          </motion.div>
+        )}
+
+        {activeTab === 'requests' && activeSubTab === 'req-leave' && (
+           <motion.div key="leaves" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="space-y-6 pb-24">
+              <div className="flex items-center justify-between">
+                 <h3 className="text-xl font-light uppercase tracking-[0.2em] text-slate-900 dark:text-white">Leave Protocol</h3>
+                 <button onClick={() => setShowLeaveModal(true)} className="p-3 bg-[#10b981] text-[#020617] rounded-2xl shadow-lg hover:shadow-emerald-500/20 transition-all active:scale-95">
+                    <Plus className="w-5 h-5" />
+                 </button>
+              </div>
+
+              <div className="flex bg-slate-100 dark:bg-[#020617] p-1 rounded-2xl w-full max-w-sm border border-slate-200/50 dark:border-slate-800/50 shadow-inner">
+                {(['All', 'Pending', 'Approved', 'Rejected'] as const).map(status => (
+                  <button 
+                    key={`admin-leave-filter-${status}`}
+                    onClick={() => setLeaveFilterStatus(status)}
+                    className={`flex-1 py-3 text-[8px] font-bold uppercase tracking-widest rounded-xl transition-all ${leaveFilterStatus === status ? 'bg-white dark:bg-slate-800 text-emerald-500 shadow-lg' : 'text-slate-400 hover:text-slate-600 dark:hover:text-white'}`}
+                  >
+                    {status}
+                  </button>
+                ))}
+              </div>
+
+              <div className="space-y-4">
+                {allLeaveRequests
+                  .filter(req => leaveFilterStatus === 'All' || req.status === leaveFilterStatus)
+                  .map((leave) => {
+                    const teacher = teachers.find(t => t.id === leave.teacher_id);
+                    return (
+                      <div key={`admin-leave-req-${leave.id}`} className="bg-card border border-border p-6 rounded-3xl space-y-5 relative overflow-hidden group shadow-sm hover:shadow-md transition-all">
+                        <div className={`absolute top-0 right-0 w-1.5 h-full ${
+                          leave.status === 'Approved' ? 'bg-emerald-500' : 
+                          leave.status === 'Rejected' ? 'bg-red-500' : 
+                          'bg-amber-500'
+                        }`} />
+                        
+                        <div className="flex justify-between items-start gap-4">
+                          <div className="space-y-1 flex-1">
+                            <h4 className="text-[11px] font-bold uppercase tracking-widest text-slate-900 dark:text-white leading-relaxed">{leave.leave_type}</h4>
+                            <p className="text-[8px] text-slate-500 uppercase tracking-widest font-bold">BY: {teacher?.name || 'Unknown Officer'}</p>
+                          </div>
+                          <span className={`text-[8px] uppercase tracking-widest px-2 py-1 rounded border font-bold ${
+                            leave.status === 'Approved' ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20' : 
+                            leave.status === 'Rejected' ? 'bg-red-500/10 text-red-500 border-red-500/20' : 
+                            'bg-amber-500/10 text-amber-500 border-amber-500/20'
+                          }`}>
+                            {leave.status}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center justify-between py-3 border-y border-slate-100 dark:border-slate-800/50">
+                          <div className="flex items-center gap-3 text-slate-500">
+                            <Calendar className="w-3.5 h-3.5 text-emerald-500" />
+                            <span className="text-[10px] font-mono tracking-tighter">{leave.from_date} — {leave.to_date}</span>
+                          </div>
+                          <span className="text-[9px] font-bold font-mono text-slate-400 bg-slate-50 dark:bg-slate-800 px-2.5 py-0.5 rounded-lg">{leave.days || 0} DAYS</span>
+                        </div>
+
+                        <div className="space-y-3">
+                          <p className="text-[10px] text-slate-500 leading-relaxed italic">
+                            "{leave.reason}"
+                          </p>
+                          {leave.document_url && (
+                            <a 
+                              href={leave.document_url} 
+                              target="_blank" 
+                              rel="noreferrer" 
+                              className="inline-flex items-center gap-2 text-[9px] font-bold uppercase tracking-widest text-[#10b981] hover:text-emerald-400 transition-colors bg-emerald-500/5 px-3 py-2 rounded-xl border border-emerald-500/10"
+                            >
+                              <FileText className="w-3.5 h-3.5" /> Supporting Document
+                            </a>
+                          )}
+                        </div>
+
+                        {leave.status === 'Pending' && (
+                          <div className="flex gap-3 pt-4">
+                            <button 
+                              onClick={() => handleLeaveAction(leave.id, 'Approved')}
+                              disabled={isProcessingLeave === leave.id}
+                              className="flex-1 bg-emerald-500 text-slate-900 rounded-xl font-bold py-3 text-[9px] uppercase tracking-widest hover:bg-emerald-400 transition-all disabled:opacity-50 shadow-lg shadow-emerald-500/20"
+                            >
+                              Approve
+                            </button>
+                            <button 
+                              onClick={() => handleLeaveAction(leave.id, 'Rejected')}
+                              disabled={isProcessingLeave === leave.id}
+                              className="flex-1 bg-red-500/10 text-red-500 border border-red-500/20 rounded-xl font-bold py-3 text-[9px] uppercase tracking-widest hover:bg-red-500 hover:text-white transition-all disabled:opacity-50"
+                            >
+                              Decline
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+
+                {allLeaveRequests.filter(req => leaveFilterStatus === 'All' || req.status === leaveFilterStatus).length === 0 && (
+                  <div className="py-24 text-center bg-slate-50 dark:bg-[#0f172a]/30 border border-dashed border-slate-200 dark:border-slate-800 rounded-[2.5rem]">
+                    <div className="w-16 h-16 bg-slate-100 dark:bg-slate-800 rounded-2xl flex items-center justify-center mx-auto mb-4 opacity-50">
+                      <Shield className="w-8 h-8 text-slate-400" />
+                    </div>
+                    <p className="text-[10px] text-slate-500 uppercase tracking-widest font-bold">No authorization logs found</p>
+                  </div>
+                )}
+              </div>
+           </motion.div>
+        )}
+
+        {activeTab === 'requests' && activeSubTab === 'req-training' && (
+          <motion.div key="training" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="space-y-6 pb-24">
+             <div className="flex items-center justify-between">
+                <h3 className="text-xl font-light uppercase tracking-[0.2em] text-slate-900 dark:text-white">Training Hub</h3>
+             </div>
+
+             <div className="bg-card border border-slate-800 p-12 rounded-[3.5rem] shadow-2xl text-center">
+                <div className="w-20 h-20 bg-slate-900 rounded-[2.5rem] flex items-center justify-center mx-auto mb-8 border border-slate-800 shadow-xl">
+                  <BookOpen className="w-8 h-8 text-emerald-500" />
+                </div>
+                <h4 className="text-lg font-bold text-white uppercase tracking-[0.3em] mb-4">No Active Training</h4>
+                <p className="text-[10px] text-slate-500 uppercase tracking-widest max-w-xs mx-auto leading-relaxed">The professional development database is currently clear. Check back later for assigned courses and certificates.</p>
+             </div>
+          </motion.div>
+        )}
+
+        {activeTab === 'exams' && (
+          <motion.div key="exams" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="space-y-6 pb-24">
+            <div className="flex items-center justify-between">
+               <h3 className="text-xl font-light uppercase tracking-[0.2em] text-slate-900 dark:text-white">Exam Center</h3>
+            </div>
+
+            <div className="flex overflow-x-auto bg-slate-100 dark:bg-[#020617] p-1 rounded-2xl border border-slate-200/50 dark:border-slate-800/50 shadow-inner no-scrollbar">
+              {[
+                { id: 'sessions', label: 'Sessions', icon: Layers },
+                { id: 'semesters', label: 'Semesters', icon: ClipboardList },
+                { id: 'subjects', label: 'Subjects', icon: BookOpen },
+                { id: 'assignment', label: 'Class Subjects', icon: GraduationCap },
+                { id: 'results', label: 'Overall Results', icon: BarChart3 }
+              ].map(mode => (
+                <button 
+                  key={`exam-mgmt-mode-${mode.id}`}
+                  onClick={() => setExamManagementMode(mode.id as any)}
+                  className={`flex-1 min-w-[100px] py-3 flex items-center justify-center gap-2 text-[8px] font-bold uppercase tracking-widest rounded-xl transition-all ${examManagementMode === mode.id ? 'bg-white dark:bg-slate-800 text-emerald-500 shadow-lg' : 'text-slate-400'}`}
+                >
+                  <mode.icon className="w-3 h-3" />
+                  {mode.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="bg-card border border-border p-8 rounded-3xl shadow-sm space-y-8">
+              {examManagementMode === 'sessions' && (
+                <div className="space-y-6">
+                  <form onSubmit={saveSession} className="flex gap-4">
+                    <input 
+                      type="text" placeholder="Session Name (e.g. 2024-25)" 
+                      value={sessionForm.name} onChange={e => setSessionForm({...sessionForm, name: e.target.value})}
+                      className="flex-1 bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs"
+                    />
+                    <button type="submit" className="px-6 py-3 bg-[#10b981] text-white rounded-xl text-[10px] font-bold uppercase tracking-widest">Add Session</button>
+                  </form>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {sessions.map(s => (
+                      <div key={`session-${s.id}`} className="p-4 bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-2xl flex justify-between items-center">
+                        <span className="text-xs font-bold text-slate-900 dark:text-white uppercase">{s.name}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {examManagementMode === 'semesters' && (
+                <div className="space-y-6">
+                  <form onSubmit={saveSemester} className="flex gap-4">
+                    <input 
+                      type="text" placeholder="Semester Name (e.g. Mid Term)" 
+                      value={semesterForm.name} onChange={e => setSemesterForm({...semesterForm, name: e.target.value})}
+                      className="flex-1 bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs"
+                    />
+                    <button type="submit" className="px-6 py-3 bg-[#10b981] text-white rounded-xl text-[10px] font-bold uppercase tracking-widest">Add Semester</button>
+                  </form>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {semesters.map(s => (
+                      <div key={`semester-${s.id}`} className="p-4 bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-2xl flex justify-between items-center">
+                        <span className="text-xs font-bold text-slate-900 dark:text-white uppercase">{s.name}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {examManagementMode === 'subjects' && (
+                <div className="space-y-6">
+                  <form onSubmit={saveSubject} className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <input 
+                      type="text" placeholder="Subject Name" 
+                      value={subjectForm.name} onChange={e => setSubjectForm({...subjectForm, name: e.target.value})}
+                      className="bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs"
+                    />
+                    <input 
+                      type="text" placeholder="Subject Code (Opt)" 
+                      value={subjectForm.code} onChange={e => setSubjectForm({...subjectForm, code: e.target.value})}
+                      className="bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs"
+                    />
+                    <button type="submit" className="px-6 py-3 bg-[#10b981] text-white rounded-xl text-[10px] font-bold uppercase tracking-widest">Add Subject</button>
+                  </form>
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    {subjects.map(s => (
+                      <div key={`subject-${s.id}`} className="p-4 bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-2xl flex flex-col gap-1">
+                        <span className="text-[10px] font-bold text-slate-900 dark:text-white uppercase">{s.name}</span>
+                        <span className="text-[8px] text-slate-500 font-mono tracking-widest">{s.code || 'NO CODE'}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {examManagementMode === 'assignment' && (
+                <div className="space-y-6">
+                  <form onSubmit={assignSubjectToClass} className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <select 
+                        value={classSubjectForm.class_id}
+                        onChange={e => setClassSubjectForm({...classSubjectForm, class_id: e.target.value})}
+                        className="bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs"
+                    >
+                        <option value="">Select Class</option>
+                        {allClasses.map(c => <option key={`assign-class-${c.id}`} value={c.id}>{c.class_name || c.name}</option>)}
+                    </select>
+                    <select 
+                        value={classSubjectForm.subject_id}
+                        onChange={e => setClassSubjectForm({...classSubjectForm, subject_id: e.target.value})}
+                        className="bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs"
+                    >
+                        <option value="">Select Subject</option>
+                        {subjects.map(s => <option key={`assign-subj-${s.id}`} value={s.id}>{s.name}</option>)}
+                    </select>
+                    <input 
+                      type="number" placeholder="Total Marks" 
+                      value={classSubjectForm.total_marks} onChange={e => setClassSubjectForm({...classSubjectForm, total_marks: parseInt(e.target.value)})}
+                      className="bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs"
+                    />
+                    <input 
+                      type="number" placeholder="Passing Marks" 
+                      value={classSubjectForm.passing_marks} onChange={e => setClassSubjectForm({...classSubjectForm, passing_marks: parseInt(e.target.value)})}
+                      className="bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-xs"
+                    />
+                    <button type="submit" className="px-6 py-3 bg-[#10b981] text-white rounded-xl text-[10px] font-bold uppercase tracking-widest">Assign Subject</button>
+                  </form>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse">
+                        <thead>
+                            <tr className="border-b border-slate-200 dark:border-slate-800">
+                                <th className="py-4 text-[8px] font-bold uppercase tracking-widest text-slate-500">Class</th>
+                                <th className="py-4 text-[8px] font-bold uppercase tracking-widest text-slate-500">Subject</th>
+                                <th className="py-4 text-[8px] font-bold uppercase tracking-widest text-slate-500">Teacher</th>
+                                <th className="py-4 text-[8px] font-bold uppercase tracking-widest text-slate-500">Marks</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {classSubjects.map(cs => {
+                                const cls = allClasses.find(c => c.id === cs.class_id);
+                                const subj = subjects.find(s => s.id === cs.subject_id);
+                                const teacher = teachers.find(t => t.id === cs.teacher_id);
+                                return (
+                                    <tr key={`cs-row-${cs.id}`} className="border-b border-slate-100 dark:border-slate-800/50 hover:bg-slate-50 dark:hover:bg-slate-800/20 transition-colors">
+                                        <td className="py-4 text-[10px] font-bold text-slate-900 dark:text-white uppercase">{cls?.class_name || cls?.name || 'Unknown'}</td>
+                                        <td className="py-4 text-[10px] text-slate-600 dark:text-slate-400 uppercase">{subj?.name || 'Unknown'}</td>
+                                        <td className="py-4 text-[10px] text-slate-600 dark:text-slate-400 uppercase">{teacher?.name || 'Unassigned'}</td>
+                                        <td className="py-4 text-[10px] text-slate-600 dark:text-slate-400 uppercase font-mono">{cs.passing_marks} / {cs.total_marks}</td>
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {examManagementMode === 'results' && (
+                <div className="space-y-8">
+                  {/* Summary Cards */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div className="bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 p-6 rounded-3xl">
+                      <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-1 font-bold">Overall Pass Rate</p>
+                      <h4 className="text-3xl font-mono text-[#10b981]">
+                        {examResults.length > 0 
+                          ? `${Math.round((examResults.filter(r => r.obtained_marks >= r.passing_marks).length / examResults.length) * 100)}%`
+                          : '0%'}
+                      </h4>
+                      <p className="text-[8px] text-slate-400 uppercase tracking-widest mt-2">{examResults.length} total entries</p>
+                    </div>
+                    <div className="bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 p-6 rounded-3xl">
+                      <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-1 font-bold">Average Percentage</p>
+                      <h4 className="text-3xl font-mono text-blue-500">
+                        {examResults.length > 0 
+                          ? `${Math.round((examResults.reduce((acc, curr) => acc + (curr.obtained_marks / curr.total_marks), 0) / examResults.length) * 100)}%`
+                          : '0%'}
+                      </h4>
+                      <p className="text-[8px] text-slate-400 uppercase tracking-widest mt-2">Weighted student progress</p>
+                    </div>
+                    <div className="bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 p-6 rounded-3xl">
+                      <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-1 font-bold">Total Certificates</p>
+                      <h4 className="text-3xl font-mono text-purple-500">
+                        {examResults.filter(r => (r.obtained_marks / r.total_marks) >= 0.8).length}
+                      </h4>
+                      <p className="text-[8px] text-slate-400 uppercase tracking-widest mt-2">Students above 80% (A grade)</p>
+                    </div>
+                  </div>
+
+                  {/* Actions */}
+                  <div className="flex items-center justify-between">
+                    <h5 className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-400">Class-wise Analysis</h5>
+                    <div className="flex gap-2">
+                       <button 
+                         onClick={() => {
+                           const worksheet = XLSX.utils.json_to_sheet(
+                             allClasses.map(cls => {
+                               const clsResults = examResults.filter(r => r.class_id === cls.id);
+                               const passCount = clsResults.filter(r => r.obtained_marks >= r.passing_marks).length;
+                               return {
+                                 'Class Name': cls.class_name,
+                                 'Total Students': clsResults.length,
+                                 'Passed': passCount,
+                                 'Failed': clsResults.length - passCount,
+                                 'Pass Percentage': clsResults.length > 0 ? `${Math.round((passCount / clsResults.length) * 100)}%` : '0%'
+                               };
+                             })
+                           );
+                           const workbook = XLSX.utils.book_new();
+                           XLSX.utils.book_append_sheet(workbook, worksheet, "Class Results");
+                           XLSX.writeFile(workbook, "School_Classwise_Results.xlsx");
+                         }}
+                         className="flex items-center gap-2 px-4 py-2 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 rounded-xl text-[8px] font-bold uppercase tracking-widest hover:bg-slate-200 dark:hover:bg-slate-700 transition"
+                       >
+                         <FileText className="w-3 h-3" /> Export Excel
+                       </button>
+                       <button 
+                         onClick={() => {
+                            const doc = new jsPDF() as any;
+                            doc.setFontSize(18);
+                            doc.text(schoolName || 'School Information System', 14, 20);
+                            doc.setFontSize(12);
+                            doc.text('Overall Class-wise Academic Performance Report', 14, 28);
+                            doc.setFontSize(8);
+                            doc.text(`Generated on: ${new Date().toLocaleString()}`, 14, 34);
+
+                            const tableData = allClasses.map(cls => {
+                              const clsResults = examResults.filter(r => r.class_id === cls.id);
+                              const passCount = clsResults.filter(r => r.obtained_marks >= r.passing_marks).length;
+                              return [
+                                cls.class_name,
+                                clsResults.length.toString(),
+                                passCount.toString(),
+                                (clsResults.length - passCount).toString(),
+                                clsResults.length > 0 ? `${Math.round((passCount / clsResults.length) * 100)}%` : '0%'
+                              ];
+                            });
+
+                            autoTable(doc, {
+                              startY: 40,
+                              head: [['Class', 'Total', 'Passed', 'Failed', 'Pass %']],
+                              body: tableData,
+                              theme: 'grid',
+                              styles: { fontSize: 8, cellPadding: 3 },
+                              headStyles: { fillColor: [16, 185, 129] }
+                            });
+
+                            doc.save('School_Performance_Report.pdf');
+                         }}
+                         className="flex items-center gap-2 px-4 py-2 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 rounded-xl text-[8px] font-bold uppercase tracking-widest hover:bg-slate-200 dark:hover:bg-slate-700 transition"
+                       >
+                         <FileText className="w-3 h-3" /> Export PDF
+                       </button>
+                    </div>
+                  </div>
+
+                  {/* Class-wise Table */}
+                  <div className="overflow-hidden border border-slate-200 dark:border-slate-800 rounded-3xl shadow-sm">
+                    <table className="w-full text-left border-collapse">
+                      <thead className="bg-slate-50 dark:bg-[#020617]">
+                        <tr>
+                          <th className="p-4 text-[8px] font-bold uppercase tracking-widest text-slate-500">Class</th>
+                          <th className="p-4 text-[8px] font-bold uppercase tracking-widest text-slate-500">Total Entries</th>
+                          <th className="p-4 text-[8px] font-bold uppercase tracking-widest text-slate-500">Qualified</th>
+                          <th className="p-4 text-[8px] font-bold uppercase tracking-widest text-slate-500">Failed</th>
+                          <th className="p-4 text-[8px] font-bold uppercase tracking-widest text-slate-500">Outcome</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800/50">
+                        {allClasses.map(cls => {
+                          const clsResults = examResults.filter(r => r.class_id === cls.id);
+                          const passCount = clsResults.filter(r => r.obtained_marks >= r.passing_marks).length;
+                          const failCount = clsResults.length - passCount;
+                          const passPerc = clsResults.length > 0 ? Math.round((passCount / clsResults.length) * 100) : 0;
+                          
+                          return (
+                            <tr key={`result-cls-${cls.id}`} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/20 transition-colors group">
+                              <td className="p-4">
+                                <div className="flex flex-col">
+                                  <span className="text-xs font-bold text-slate-900 dark:text-white uppercase group-hover:text-[#10b981] transition-colors">{cls.class_name}</span>
+                                  <span className="text-[7px] text-slate-400 uppercase tracking-tighter">Academic Year 2024</span>
+                                </div>
+                              </td>
+                              <td className="p-4 text-[10px] font-mono text-slate-600 dark:text-slate-400">{clsResults.length}</td>
+                              <td className="p-4 text-[10px] font-mono text-emerald-500">{passCount}</td>
+                              <td className="p-4 text-[10px] font-mono text-rose-500">{failCount}</td>
+                              <td className="p-4">
+                                <div className="flex items-center gap-3">
+                                  <div className="flex-1 h-1 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
+                                     <div 
+                                      className={`h-full transition-all duration-1000 ${passPerc >= 60 ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : passPerc >= 33 ? 'bg-amber-400' : 'bg-rose-500'}`} 
+                                      style={{ width: `${passPerc}%` }} 
+                                     />
+                                  </div>
+                                  <span className={`text-[10px] font-mono font-bold w-10 text-right ${passPerc >= 60 ? 'text-emerald-500' : passPerc >= 33 ? 'text-amber-500' : 'text-rose-500'}`}>{passPerc}%</span>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          </motion.div>
+        )}
+
+        {activeTab === 'calendar' && (
+          <motion.div key="calendar" initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} className="space-y-8 pb-24 text-left">
+            <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
+              <div className="space-y-1">
+                <h3 className="text-2xl font-bold tracking-[0.1em] uppercase text-slate-900 dark:text-white leading-tight">Academic Timeline</h3>
+                <p className="text-[10px] text-emerald-500 uppercase tracking-widest font-bold">Chronological synchronization of assignments and events</p>
+              </div>
+              <div className="flex items-center gap-4">
+                 <div className="flex items-center gap-4 bg-card border border-slate-800 p-2 rounded-2xl shadow-xl">
+                   <button onClick={() => changeMonth(-1)} className="p-3 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition-all"><ChevronLeft className="w-5 h-5" /></button>
+                   <div className="px-6 text-center min-w-[200px]">
+                      <h4 className="text-sm font-bold uppercase tracking-[0.2em] text-white">
+                        {currentCalendarDate.toLocaleString('default', { month: 'long' })} {currentCalendarDate.getFullYear()}
+                      </h4>
+                   </div>
+                   <button onClick={() => changeMonth(1)} className="p-3 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition-all"><ChevronRight className="w-5 h-5" /></button>
+                 </div>
+                 <button 
+                  onClick={() => {
+                    setEditingEvent(null);
+                    setEventForm({
+                      title: '',
+                      date: selectedCalendarDay ? selectedCalendarDay.toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
+                      type: 'event',
+                      description: ''
+                    });
+                    setIsEventModalOpen(true);
+                  }}
+                  className="px-6 py-4 bg-emerald-500 text-slate-950 rounded-2xl text-[10px] font-bold uppercase tracking-widest shadow-xl shadow-emerald-500/20 hover:scale-105 active:scale-95 transition-all flex items-center gap-3"
+                 >
+                   <Plus className="w-4 h-4" />
+                   Create Event
+                 </button>
+              </div>
+            </div>
+
+            <div className="grid lg:grid-cols-4 gap-8">
+              {/* Main Calendar Grid */}
+              <div className="lg:col-span-3 space-y-6">
+                 <div className="bg-card border border-slate-800 rounded-[2.5rem] overflow-hidden shadow-2xl">
+                    <div className="grid grid-cols-7 border-b border-slate-800 bg-[#020617]/50">
+                      {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(day => (
+                        <div key={`cal-header-${day}`} className="py-6 text-center">
+                          <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">{day}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="grid grid-cols-7 gap-px bg-slate-800">
+                      {getCalendarDays().map((day, idx) => {
+                        const dateStr = day?.toISOString().split('T')[0];
+                        const dayEvents = schoolEvents.filter(e => e.date === dateStr);
+                        const isToday = dateStr === new Date().toISOString().split('T')[0];
+                        const isSelected = selectedCalendarDay?.getTime() === day?.getTime();
+
+                        return (
+                          <div 
+                            key={`cal-day-${idx}`} 
+                            onClick={() => day && setSelectedCalendarDay(day)}
+                            className={`min-h-[140px] bg-card p-4 transition-all relative group cursor-pointer hover:bg-slate-900/30 ${!day ? 'bg-slate-950/50' : ''} ${isSelected ? 'ring-2 ring-emerald-500/50 z-10' : ''}`}
+                          >
+                            {day && (
+                              <div className="space-y-3">
+                                <div className="flex justify-between items-start">
+                                  <span className={`text-xs font-mono font-bold ${isToday ? 'bg-emerald-500 text-slate-950 w-7 h-7 flex items-center justify-center rounded-lg shadow-lg shadow-emerald-500/20' : 'text-slate-500'}`}>
+                                    {day.getDate()}
+                                  </span>
+                                  {dayEvents.length > 0 && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />}
+                                </div>
+                                <div className="space-y-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                                  {dayEvents.map(e => (
+                                    <div key={`day-ev-${e.id}`} className={`px-2 py-1 rounded text-[8px] font-bold uppercase tracking-tighter truncate border bg-${e.color}-500/10 text-${e.color}-500 border-${e.color}-500/20`}>
+                                      {e.title}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                 </div>
+              </div>
+
+              {/* Sidebar / Daily Detail */}
+              <div className="space-y-6">
+                <div className="bg-card border border-slate-800 p-8 rounded-[2.5rem] shadow-2xl space-y-6">
+                  <div className="flex items-center gap-3 pb-4 border-b border-slate-800">
+                    <div className="p-3 rounded-2xl bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
+                      <Star className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-bold uppercase tracking-widest text-white">Daily Agenda</h4>
+                      <p className="text-[9px] text-slate-500 uppercase tracking-widest font-bold">
+                        {selectedCalendarDay ? selectedCalendarDay.toLocaleDateString('default', { dateStyle: 'long' }) : 'Select Date'}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-4">
+                    {selectedCalendarDay ? (
+                      (() => {
+                        const dateStr = selectedCalendarDay.toISOString().split('T')[0];
+                        const dayEvents = schoolEvents.filter(e => e.date === dateStr);
+                        
+                        if (dayEvents.length === 0) {
+                          return (
+                            <div className="py-12 text-center space-y-4 bg-slate-900/20 rounded-3xl border border-dashed border-slate-800">
+                              <Bell className="w-8 h-8 text-slate-700 mx-auto" />
+                              <p className="text-[10px] text-slate-600 uppercase tracking-widest leading-relaxed">No administrative events<br/>queued for this unit.</p>
+                            </div>
+                          );
+                        }
+
+                        return dayEvents.map(e => (
+                          <div key={`agenda-ev-${e.id}`} className="group p-5 rounded-3xl bg-slate-900/50 border border-slate-800 hover:border-emerald-500/30 transition-all relative">
+                             <div className="flex items-start gap-4">
+                                <div className={`w-2 h-2 rounded-full bg-${e.color}-500 mt-1.5 shadow-[0_0_10px_rgba(var(--${e.color}-rgb),0.5)]`} />
+                                <div className="space-y-2 flex-1">
+                                  <div className="flex items-center justify-between">
+                                    <p className="text-[11px] font-bold text-white uppercase tracking-widest leading-tight">{e.title}</p>
+                                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                      <button 
+                                        onClick={() => openEditEvent(e)}
+                                        className="p-1.5 text-slate-400 hover:text-emerald-500 hover:bg-emerald-500/10 rounded-lg transition-all"
+                                      >
+                                        <Edit className="w-3 h-3" />
+                                      </button>
+                                      <button 
+                                        onClick={() => handleDeleteEvent(e.id)}
+                                        className="p-1.5 text-slate-400 hover:text-rose-500 hover:bg-rose-500/10 rounded-lg transition-all"
+                                      >
+                                        <Trash2 className="w-3 h-3" />
+                                      </button>
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center gap-3">
+                                    <span className={`px-2 py-0.5 rounded text-[8px] font-bold uppercase tracking-[0.1em] bg-${e.color}-500/10 text-${e.color}-500`}>{e.type}</span>
+                                    {e.description && <span className="w-1 h-1 bg-slate-800 rounded-full" />}
+                                    {e.description && <p className="text-[9px] text-slate-500 line-clamp-1">{e.description}</p>}
+                                  </div>
+                                </div>
+                             </div>
+                          </div>
+                        ));
+                      })()
+                    ) : (
+                      <div className="py-20 text-center space-y-4">
+                        <div className="w-16 h-16 bg-slate-900 rounded-2xl flex items-center justify-center mx-auto border border-slate-800">
+                          <History className="w-6 h-6 text-slate-700" />
+                        </div>
+                        <p className="text-[9px] text-slate-500 uppercase tracking-widest">Awaiting interaction</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-emerald-500 p-8 rounded-[2.5rem] shadow-2xl shadow-emerald-500/20 relative overflow-hidden group">
+                   <div className="absolute top-0 right-0 p-4 text-emerald-400/20 opacity-0 group-hover:opacity-100 transition-opacity">
+                     <GraduationCap className="w-24 h-24" />
+                   </div>
+                   <h4 className="text-slate-950 font-bold text-lg uppercase tracking-widest leading-tight mb-2">Annual Year<br/>2024 - 2025</h4>
+                   <p className="text-slate-900/70 text-[10px] uppercase font-bold tracking-widest">Strategic timeline active</p>
+                </div>
+
+                <div className="bg-card border border-slate-800 p-8 rounded-[2.5rem] shadow-2xl space-y-6">
+                   <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-500 flex items-center gap-2">
+                     <Users className="w-3 h-3" /> Staff Allocation
+                   </h4>
+                   <div className="space-y-3">
+                      {assignments.slice(0, 5).map(asg => {
+                        const cls = allClasses.find(c => c.id === asg.class_id);
+                        const teacher = teachers.find(t => t.id === asg.teacher_id);
+                        return (
+                          <div key={`cal-asg-${asg.id}`} className="p-4 rounded-2xl bg-slate-900/30 border border-slate-800/50">
+                             <p className="text-[9px] font-bold text-white uppercase">{cls?.class_name || 'Class'}</p>
+                             <p className="text-[8px] text-emerald-500 uppercase tracking-widest mt-1">{teacher?.name || 'Teacher'}</p>
+                          </div>
+                        );
+                      })}
+                      {assignments.length > 5 && (
+                        <p className="text-[7px] text-slate-600 uppercase tracking-widest text-center">+ {assignments.length - 5} more assignments</p>
+                      )}
+                      {assignments.length === 0 && (
+                        <p className="text-[8px] text-slate-600 uppercase tracking-widest text-center py-4">No active assignments</p>
+                      )}
+                   </div>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+
+        {activeTab === 'profile' && (
+          <motion.div key="profile" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-8 pb-20">
+             <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+                <div>
+                  <h3 className="text-2xl font-bold tracking-[0.1em] uppercase text-slate-900 dark:text-white leading-tight">Identity Terminal</h3>
+                  <p className="text-[10px] text-emerald-500 uppercase tracking-widest font-bold mt-1">Personnel Management Interface</p>
+                </div>
+                <div className="flex bg-slate-100 dark:bg-slate-900/50 p-1.5 rounded-2xl border border-slate-200 dark:border-slate-800 backdrop-blur-md self-start">
+                   {[
+                     { id: 'profile-view', label: 'Manage Profile', icon: User },
+                     { id: 'profile-security', label: 'Change Password', icon: Shield }
+                   ].map((tab) => (
+                     <button 
+                       key={`profile-tab-${tab.id}`}
+                       onClick={() => setActiveSubTab(tab.id as any)}
+                       className={`flex items-center gap-3 px-6 py-2.5 text-[9px] font-bold uppercase tracking-widest rounded-xl transition-all ${activeSubTab === tab.id ? 'bg-emerald-500 text-slate-950 shadow-lg shadow-emerald-500/20' : 'text-slate-500 hover:text-slate-900 dark:hover:text-white hover:bg-white dark:hover:bg-slate-800/50'}`}
+                     >
+                       <tab.icon className="w-4 h-4" />
+                       {tab.label}
+                     </button>
+                   ))}
+                </div>
+             </div>
+
+             {activeSubTab === 'profile-view' && (
+               <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                  <div className="lg:col-span-1 space-y-6">
+                    <div className="bg-card border border-border p-8 rounded-[3rem] shadow-xl text-center space-y-6 relative overflow-hidden group">
+                       <div className="absolute inset-x-0 top-0 h-2 bg-emerald-500" />
+                       <div className="relative inline-block group/avatar">
+                          <div className="w-32 h-32 rounded-[2.5rem] bg-slate-100 dark:bg-slate-900 border-4 border-white dark:border-slate-800 shadow-2xl overflow-hidden flex items-center justify-center transition-transform group-hover/avatar:scale-105">
+                             {profileData.avatar || user.profile_picture_url ? (
+                               <img src={profileData.avatar || user.profile_picture_url} alt={user.name!} className="w-full h-full object-cover" />
+                             ) : (
+                               <User className="w-12 h-12 text-slate-300" />
+                             )}
+                          </div>
+                          <label 
+                            className="absolute bottom-0 right-0 p-3 bg-emerald-500 text-slate-950 rounded-2xl shadow-xl hover:scale-110 active:scale-95 transition-all border-4 border-white dark:border-[#020617] cursor-pointer"
+                            title="Update Biometrics"
+                          >
+                             <Plus className="w-4 h-4" />
+                             <input 
+                               type="file" 
+                               className="hidden" 
+                               accept="image/*"
+                               onChange={(e) => {
+                                 const file = e.target.files?.[0];
+                                 if (file) {
+                                   const reader = new FileReader();
+                                   reader.onloadend = () => {
+                                     setProfileData(prev => ({...prev, avatar: reader.result as string}));
+                                   };
+                                   reader.readAsDataURL(file);
+                                 }
+                               }}
+                             />
+                          </label>
+                       </div>
+                       <div>
+                          <h4 className="text-xl font-bold uppercase tracking-widest text-slate-900 dark:text-white leading-tight">{user.name}</h4>
+                          <p className="text-[10px] text-emerald-500 font-bold uppercase tracking-[0.2em] mt-2">{user.designation || user.role}</p>
+                       </div>
+                       <div className="pt-6 border-t border-slate-100 dark:border-slate-800 grid grid-cols-2 gap-4">
+                          <div className="bg-slate-50 dark:bg-slate-900/40 p-4 rounded-2xl border border-border">
+                             <p className="text-[8px] text-slate-500 uppercase tracking-widest mb-1">Emp ID</p>
+                             <p className="text-xs font-mono font-bold text-slate-900 dark:text-white">{user.id}</p>
+                          </div>
+                          <div className="bg-slate-50 dark:bg-slate-900/40 p-4 rounded-2xl border border-border">
+                             <p className="text-[8px] text-slate-500 uppercase tracking-widest mb-1">Status</p>
+                             <p className="text-xs font-bold text-emerald-500 uppercase">Active</p>
+                          </div>
+                       </div>
+                    </div>
+                  </div>
+
+                  <div className="lg:col-span-2 space-y-6">
+                    <div className="bg-card border border-border p-10 rounded-[3rem] shadow-xl space-y-8">
+                       <div className="flex items-center justify-between">
+                          <h4 className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-400">Core Identity Data</h4>
+                          <button 
+                            onClick={() => setIsEditingProfile(!isEditingProfile)}
+                            className="text-[9px] font-bold uppercase tracking-widest px-6 py-2.5 rounded-xl border border-border hover:bg-emerald-500/10 hover:text-emerald-500 transition-all flex items-center gap-2 group"
+                          >
+                             <Edit className="w-3.5 h-3.5 opacity-50 group-hover:opacity-100" />
+                             {isEditingProfile ? 'Cancel Edits' : 'Open Modification Link'}
+                          </button>
+                       </div>
+
+                       <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                          <div className="space-y-1.5">
+                             <label className="text-[9px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Legal Name</label>
+                             <input 
+                               readOnly={!isEditingProfile} 
+                               value={profileData.name} 
+                               onChange={e => setProfileData({...profileData, name: e.target.value})}
+                               className={`w-full bg-slate-50 dark:bg-[#020617] border border-border rounded-2xl px-5 py-4 text-xs ${isEditingProfile ? 'text-white border-emerald-500/30' : 'text-slate-400 opacity-60'} outline-none transition-all shadow-inner`} 
+                             />
+                          </div>
+                          <div className="space-y-1.5">
+                             <label className="text-[9px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Email Protocol</label>
+                             <input 
+                               readOnly={!isEditingProfile} 
+                               value={profileData.email} 
+                               onChange={e => setProfileData({...profileData, email: e.target.value})}
+                               className={`w-full bg-slate-50 dark:bg-[#020617] border border-border rounded-2xl px-5 py-4 text-xs ${isEditingProfile ? 'text-white border-emerald-500/30' : 'text-slate-400 opacity-60'} outline-none transition-all shadow-inner`} 
+                             />
+                          </div>
+                          <div className="space-y-1.5">
+                             <label className="text-[9px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Mobile Frequency</label>
+                             <input 
+                               readOnly={!isEditingProfile} 
+                               value={profileData.phone} 
+                               onChange={e => setProfileData({...profileData, phone: e.target.value})}
+                               placeholder="e.g. +92 3XX XXXXXXX"
+                               className={`w-full bg-slate-50 dark:bg-[#020617] border border-border rounded-2xl px-5 py-4 text-xs ${isEditingProfile ? 'text-white border-emerald-500/30' : 'text-slate-400 opacity-60'} outline-none transition-all shadow-inner`} 
+                             />
+                          </div>
+                          <div className="space-y-1.5">
+                             <label className="text-[9px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Personnel ID</label>
+                             <input readOnly value={user.personnel || '654321'} className="w-full bg-slate-50 dark:bg-[#020617] border border-border rounded-2xl px-5 py-4 text-xs text-slate-500 opacity-60 outline-none font-mono" />
+                          </div>
+                       </div>
+
+                       <div className="space-y-1.5">
+                          <label className="text-[9px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Professional Biography</label>
+                          <textarea 
+                            readOnly={!isEditingProfile} 
+                            value={profileData.bio} 
+                            onChange={e => setProfileData({...profileData, bio: e.target.value})}
+                            placeholder="Brief professional mission statement..."
+                            rows={4}
+                            className={`w-full bg-slate-50 dark:bg-[#020617] border border-border rounded-3xl px-5 py-4 text-xs ${isEditingProfile ? 'text-white border-emerald-500/30' : 'text-slate-400 opacity-60'} outline-none transition-all shadow-inner`} 
+                          />
+                       </div>
+
+                       {isEditingProfile && (
+                         <div className="pt-4 flex justify-end">
+                            <button className="flex items-center gap-2 px-10 py-5 bg-emerald-500 text-slate-950 rounded-2xl font-bold uppercase tracking-widest text-[10px] shadow-xl shadow-emerald-500/20 hover:scale-[1.02] active:scale-[0.98] transition-all">
+                               Synchronize Record
+                            </button>
+                         </div>
+                       )}
+                    </div>
+                  </div>
+               </div>
+             )}
+
+             {activeSubTab === 'profile-security' && (
+               <div className="max-w-2xl mx-auto w-full">
+                  <div className="bg-card border border-border p-10 rounded-[3rem] shadow-xl space-y-10 relative overflow-hidden">
+                     <div className="absolute top-0 right-0 p-8 opacity-5">
+                        < Shield className="w-32 h-32 text-emerald-500" />
+                     </div>
+                     <div>
+                        <h4 className="text-xl font-light uppercase tracking-[0.2em] text-slate-900 dark:text-white mb-2">Access Key Override</h4>
+                        <p className="text-[10px] text-slate-500 uppercase tracking-[0.2em] font-bold">Update session verification keys</p>
+                     </div>
+
+                     <form onSubmit={handlePasswordChange} className="space-y-6">
+                        <div className="space-y-2">
+                           <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Existing Cipher</label>
+                           <input 
+                             type="password" 
+                             required 
+                             value={passwordForm.currentPassword}
+                             onChange={e => setPasswordForm({...passwordForm, currentPassword: e.target.value})}
+                             className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-2xl px-6 py-5 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner" 
+                           />
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                           <div className="space-y-2">
+                              <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">New Security Key</label>
+                              <input 
+                                type="password" 
+                                required 
+                                value={passwordForm.newPassword}
+                                onChange={e => setPasswordForm({...passwordForm, newPassword: e.target.value})}
+                                className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-2xl px-6 py-5 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner" 
+                              />
+                           </div>
+                           <div className="space-y-2">
+                              <label className="text-[10px] text-slate-500 uppercase tracking-widest ml-1 font-bold">Recode Verification</label>
+                              <input 
+                                type="password" 
+                                required 
+                                value={passwordForm.confirmPassword}
+                                onChange={e => setPasswordForm({...passwordForm, confirmPassword: e.target.value})}
+                                className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 rounded-2xl px-6 py-5 text-xs text-white focus:border-emerald-500/50 outline-none transition-all shadow-inner" 
+                              />
+                           </div>
+                        </div>
+
+                        <div className="pt-4">
+                           <button 
+                             disabled={isUpdatingPassword}
+                             className="w-full py-5 bg-emerald-500 text-slate-950 rounded-2xl font-bold uppercase tracking-[0.3em] text-[10px] shadow-xl shadow-emerald-500/20 hover:bg-emerald-400 active:scale-[0.98] transition-all flex items-center justify-center disabled:opacity-50"
+                           >
+                              {isUpdatingPassword ? 'Applying Cryptography...' : 'Commit Security Update'}
+                           </button>
+                        </div>
+                     </form>
+                  </div>
+               </div>
+             )}
+          </motion.div>
+        )}
+
+        {activeTab === 'stats' && (
+           <motion.div key="stats" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-8 flex flex-col items-center justify-center opacity-30">
+              <Shield className="w-8 h-8 mb-4" />
+              <p className="text-[9px] uppercase tracking-widest">Admin Module Synchronizing...</p>
+           </motion.div>
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {showLeaveModal && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-6">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 bg-[#020617]/95 backdrop-blur-md" onClick={() => setShowLeaveModal(false)} />
+            <motion.div 
+              initial={{ y: 50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 50, opacity: 0 }}
+              className="bg-[#0f172a] border border-slate-800 max-w-sm w-full p-8 rounded-[2.5rem] relative z-10 shadow-3xl overflow-y-auto max-h-[90vh]"
+            >
+              <div className="absolute top-0 left-0 w-full h-1.5 bg-[#10b981]" />
+              <div className="mb-6">
+                <h3 className="text-xl font-light tracking-[0.1em] uppercase text-white mb-1">New Leave Entry</h3>
+                <p className="text-slate-500 text-[10px] uppercase tracking-widest">Authentication Required</p>
+              </div>
+              <form className="space-y-4">
+                <div className="space-y-1 text-left">
+                  <label className="text-[8px] font-bold text-slate-500 uppercase tracking-widest">Category</label>
+                  <select 
+                    value={leaveFormData.type}
+                    onChange={(e) => setLeaveFormData({ ...leaveFormData, type: e.target.value })}
+                    className="w-full bg-[#020617] border border-slate-700 px-4 py-3 rounded-xl text-xs text-white focus:border-[#10b981] outline-none appearance-none"
+                  >
+                    <option value="Casual Leave">Casual Leave</option>
+                    <option value="Sick Leave">Sick Leave</option>
+                    <option value="Annual Leave">Annual Leave</option>
+                    <option value="Personal Reason">Personal Reason / Other</option>
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1 text-left">
+                    <label className="text-[8px] font-bold text-slate-500 uppercase tracking-widest">Start Date</label>
+                    <input 
+                      type="date" 
+                      value={leaveFormData.startDate}
+                      onChange={(e) => setLeaveFormData({ ...leaveFormData, startDate: e.target.value })}
+                      className="w-full bg-[#020617] border border-slate-700 px-4 py-3 rounded-xl text-xs text-white" 
+                    />
+                  </div>
+                  <div className="space-y-1 text-left">
+                    <label className="text-[8px] font-bold text-slate-500 uppercase tracking-widest">End Date</label>
+                    <input 
+                      type="date" 
+                      value={leaveFormData.endDate}
+                      onChange={(e) => setLeaveFormData({ ...leaveFormData, endDate: e.target.value })}
+                      className="w-full bg-[#020617] border border-slate-700 px-4 py-3 rounded-xl text-xs text-white" 
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between px-4 py-3 bg-[#020617]/50 rounded-xl border border-slate-800/50">
+                  <span className="text-[9px] text-slate-500 uppercase tracking-widest">Duration</span>
+                  <span className={`text-xs font-bold font-mono ${leaveDays > 0 ? 'text-[#10b981]' : 'text-red-500'}`}>
+                    {leaveDays} {leaveDays === 1 ? 'Day' : 'Days'}
+                  </span>
+                </div>
+
+                <div className="space-y-1 text-left">
+                  <label className="text-[8px] font-bold text-slate-500 uppercase tracking-widest">Justification</label>
+                  <textarea 
+                    rows={2} 
+                    value={leaveFormData.reason}
+                    onChange={(e) => setLeaveFormData({ ...leaveFormData, reason: e.target.value })}
+                    className="w-full bg-[#020617] border border-slate-700 px-4 py-3 rounded-xl text-xs text-white resize-none" 
+                    placeholder="Enter reason for leave..." 
+                  />
+                </div>
+
+                <div className="space-y-1 text-left">
+                  <label className="text-[8px] font-bold text-slate-500 uppercase tracking-widest">Supporting Document</label>
+                  <div className="relative">
+                    <input 
+                      type="file" 
+                      id="leave-doc"
+                      className="hidden"
+                      onChange={(e) => setLeaveFormData({ ...leaveFormData, document: e.target.files?.[0] || null })}
+                    />
+                    <label 
+                      htmlFor="leave-doc"
+                      className="flex items-center justify-between w-full bg-[#020617] border border-dashed border-slate-700 px-4 py-3 rounded-xl text-[10px] text-slate-400 cursor-pointer hover:border-emerald-500 transition-colors"
+                    >
+                      <span className="truncate max-w-[150px]">
+                        {leaveFormData.document ? leaveFormData.document.name : 'Upload File (PDF/Image)'}
+                      </span>
+                      <Plus className="w-3 h-3" />
+                    </label>
+                  </div>
+                </div>
+
+                <div className="flex gap-4 pt-4">
+                  <button type="button" onClick={() => setShowLeaveModal(false)} className="flex-1 py-4 text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-white transition-colors">Discard</button>
+                  <button 
+                    type="button" 
+                    onClick={() => {
+                      if (leaveDays <= 0) return alert('Invalid date range');
+                      setShowLeaveConfirmModal(true);
+                    }}
+                    className="flex-1 bg-[#10b981] text-[#020617] rounded-xl font-bold py-4 text-[10px] uppercase tracking-widest hover:bg-emerald-400 transition-colors shadow-lg shadow-emerald-500/20"
+                  >
+                    Authorize Request
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+
+        {isEventModalOpen && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-6">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 bg-[#020617]/95 backdrop-blur-md" onClick={() => setIsEventModalOpen(false)} />
+            <motion.div 
+              initial={{ y: 50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 50, opacity: 0 }}
+              className="bg-[#0f172a] border border-slate-800 max-w-sm w-full p-8 rounded-[2.5rem] relative z-10 shadow-3xl overflow-y-auto max-h-[90vh]"
+            >
+              <div className="absolute top-0 left-0 w-full h-1.5 bg-emerald-500" />
+              <div className="mb-6">
+                <h3 className="text-xl font-light tracking-[0.1em] uppercase text-white mb-1">{editingEvent ? 'Edit Event' : 'New School Event'}</h3>
+                <p className="text-slate-500 text-[10px] uppercase tracking-widest">Administrative Control</p>
+              </div>
+              <form onSubmit={handleSaveEvent} className="space-y-4">
+                <div className="space-y-1 text-left">
+                  <label className="text-[8px] font-bold text-slate-500 uppercase tracking-widest">Event Title</label>
+                  <input 
+                    type="text" 
+                    required
+                    value={eventForm.title}
+                    onChange={(e) => setEventForm({ ...eventForm, title: e.target.value })}
+                    className="w-full bg-[#020617] border border-slate-700 px-4 py-3 rounded-xl text-xs text-white focus:border-emerald-500 outline-none" 
+                    placeholder="Enter event title"
+                  />
+                </div>
+                <div className="space-y-1 text-left">
+                  <label className="text-[8px] font-bold text-slate-500 uppercase tracking-widest">Event Type</label>
+                  <select 
+                    value={eventForm.type}
+                    onChange={(e) => setEventForm({ ...eventForm, type: e.target.value as any })}
+                    className="w-full bg-[#020617] border border-slate-700 px-4 py-3 rounded-xl text-xs text-white focus:border-emerald-500 outline-none appearance-none"
+                  >
+                    <option value="academic">Academic</option>
+                    <option value="event">General Event</option>
+                    <option value="exam">Examination</option>
+                    <option value="holiday">Public Holiday</option>
+                    <option value="staff">Staff Development</option>
+                  </select>
+                </div>
+                <div className="space-y-1 text-left">
+                  <label className="text-[8px] font-bold text-slate-500 uppercase tracking-widest">Date</label>
+                  <input 
+                    type="date" 
+                    required
+                    value={eventForm.date}
+                    onChange={(e) => setEventForm({ ...eventForm, date: e.target.value })}
+                    className="w-full bg-[#020617] border border-slate-700 px-4 py-3 rounded-xl text-xs text-white" 
+                  />
+                </div>
+                <div className="space-y-1 text-left">
+                  <label className="text-[8px] font-bold text-slate-500 uppercase tracking-widest">Description</label>
+                  <textarea 
+                    rows={2} 
+                    value={eventForm.description}
+                    onChange={(e) => setEventForm({ ...eventForm, description: e.target.value })}
+                    className="w-full bg-[#020617] border border-slate-700 px-4 py-3 rounded-xl text-xs text-white resize-none" 
+                    placeholder="Brief details (optional)..." 
+                  />
+                </div>
+
+                <div className="pt-4 flex gap-3">
+                  <button 
+                    type="button"
+                    onClick={() => setIsEventModalOpen(false)}
+                    className="flex-1 py-4 border border-slate-800 rounded-xl text-[10px] font-bold uppercase tracking-widest text-slate-400 hover:text-white transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    type="submit"
+                    disabled={isSavingEvent}
+                    className="flex-1 py-4 bg-emerald-500 text-slate-950 rounded-xl text-[10px] font-bold uppercase tracking-widest shadow-lg shadow-emerald-500/20 disabled:opacity-50 transition-all flex items-center justify-center"
+                  >
+                    {isSavingEvent ? 'Processing...' : (editingEvent ? 'Update Event' : 'Create Event')}
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showLeaveConfirmModal && (
+          <motion.div 
+            initial={{ opacity: 0 }} 
+            animate={{ opacity: 1 }} 
+            exit={{ opacity: 0 }} 
+            className="fixed inset-0 bg-[#020617]/90 backdrop-blur-md z-[110] flex items-center justify-center p-6"
+          >
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0, y: 20 }} 
+              animate={{ scale: 1, opacity: 1, y: 0 }} 
+              className="bg-white dark:bg-[#0f172a] border border-slate-200 dark:border-slate-800 w-full max-w-sm rounded-[2.5rem] p-8 shadow-2xl relative overflow-y-auto max-h-[90vh]"
+            >
+              <div className="absolute top-0 left-0 w-full h-1.5 bg-amber-500" />
+              <div className="flex flex-col items-center text-center space-y-6">
+                <div className="w-16 h-16 rounded-2xl bg-amber-500/10 flex items-center justify-center">
+                  <Calendar className="w-8 h-8 text-amber-500" />
+                </div>
+                
+                <div className="space-y-2">
+                  <h3 className="text-lg font-bold text-slate-900 dark:text-white uppercase tracking-widest">Confirm Leave</h3>
+                  <p className="text-[10px] text-slate-500 uppercase tracking-widest leading-loose">
+                    You are requesting <span className="text-amber-500 font-bold">{leaveFormData.type}</span> for <span className="text-amber-500 font-bold">{leaveDays} days</span>.
+                  </p>
+                </div>
+
+                <div className="w-full space-y-2">
+                  <div className="bg-slate-50 dark:bg-[#020617] border border-slate-100 dark:border-slate-800 p-4 rounded-2xl flex justify-between items-center">
+                    <p className="text-[8px] text-slate-500 uppercase tracking-widest">Interval</p>
+                    <p className="text-[10px] font-bold font-mono text-slate-900 dark:text-white">{leaveFormData.startDate} — {leaveFormData.endDate}</p>
+                  </div>
+                  {leaveFormData.document && (
+                    <div className="bg-emerald-500/5 border border-emerald-500/20 p-3 rounded-2xl flex justify-between items-center">
+                      <p className="text-[8px] text-emerald-600 uppercase tracking-widest font-bold">Attachment Attached</p>
+                      <p className="text-[9px] text-emerald-500 font-mono truncate max-w-[120px]">{leaveFormData.document.name}</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="w-full flex gap-4 pt-2">
+                  <button 
+                    onClick={() => setShowLeaveConfirmModal(false)}
+                    className="flex-1 py-4 text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-white transition-colors"
+                  >
+                    Adjust
+                  </button>
+                  <button 
+                    onClick={async () => {
+                      setIsProcessingLeave(0); // Using 0 as surrogate for self-leave submission loading
+                      try {
+                        let documentUrl = null;
+                        
+                        if (leaveFormData.document && isSupabaseConfigured) {
+                          const file = leaveFormData.document;
+                          const fileExt = file.name.split('.').pop();
+                          const fileName = `${user.id}-${Date.now()}.${fileExt}`;
+                          const filePath = `documents/${fileName}`; 
+                          
+                          const { error: uploadError } = await supabase.storage
+                            .from('leave-documents')
+                            .upload(filePath, file);
+
+                          if (uploadError) throw uploadError;
+
+                          const { data: { publicUrl } } = supabase.storage
+                            .from('leave-documents')
+                            .getPublicUrl(filePath);
+                          
+                          documentUrl = publicUrl;
+                        }
+
+                        if (!isSupabaseConfigured) {
+                          const mockRequest: LeaveRequest = {
+                            id: Date.now(),
+                            teacher_id: user.id,
+                            leave_type: leaveFormData.type,
+                            from_date: leaveFormData.startDate,
+                            to_date: leaveFormData.endDate,
+                            days: leaveDays,
+                            reason: leaveFormData.reason,
+                            status: 'Approved', // Admins auto-approve themselves for now or just set as Pending
+                            submitted_at: new Date().toISOString(),
+                            emis: user.emis
+                          };
+                          setAllLeaveRequests([mockRequest, ...allLeaveRequests]);
+                        } else {
+                          const { data, error } = await supabase
+                            .from('leave_requests')
+                            .insert([{
+                              teacher_id: user.id,
+                              leave_type: leaveFormData.type,
+                              from_date: leaveFormData.startDate,
+                              to_date: leaveFormData.endDate,
+                              days: leaveDays,
+                              reason: leaveFormData.reason,
+                              status: 'Pending',
+                              document_url: documentUrl,
+                              emis: user.emis
+                            }])
+                            .select();
+
+                          if (error) throw error;
+                          if (data) setAllLeaveRequests([data[0], ...allLeaveRequests]);
+                        }
+
+                        alert('Leave request submitted successfully.');
+                        setShowLeaveConfirmModal(false);
+                        setShowLeaveModal(false);
+                        setLeaveFormData({
+                          type: 'Casual Leave',
+                          startDate: new Date().toISOString().split('T')[0],
+                          endDate: new Date().toISOString().split('T')[0],
+                          reason: '',
+                          document: null
+                        });
+                      } catch (err: any) {
+                        alert(`Submission failed: ${err.message}`);
+                      } finally {
+                        setIsProcessingLeave(null);
+                      }
+                    }}
+                    disabled={isProcessingLeave !== null}
+                    className="flex-1 bg-amber-500 text-slate-900 rounded-xl font-bold py-4 text-[10px] uppercase tracking-widest hover:bg-amber-400 transition-colors shadow-lg shadow-amber-500/20 disabled:opacity-50"
+                  >
+                    {isProcessingLeave !== null ? 'Uploading...' : 'Confirm'}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </DashboardLayout>
+  );
+}
