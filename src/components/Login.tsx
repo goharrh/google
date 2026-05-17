@@ -17,8 +17,19 @@ export default function Login({ onLoginSuccess }: LoginProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-  const [view, setView] = useState<'login' | 'forgot-password' | 'signup' | 'staff-signup'>('login');
+  const [view, setView] = useState<'login' | 'forgot-password' | 'signup' | 'staff-signup' | 'google-setup'>('login');
   const [schools, setSchools] = useState<School[]>([]);
+  const [googleUserEmail, setGoogleUserEmail] = useState('');
+  const [googleUserName, setGoogleUserName] = useState('');
+  const [googleSetupData, setGoogleSetupData] = useState({
+    role: 'teacher' as 'admin' | 'teacher',
+    emis: '',
+    cnic: '',
+    designation: 'PST',
+    schoolName: '',
+    circle: '',
+    location: '',
+  });
   const [signupData, setSignupData] = useState({
     schoolName: '',
     emis: '',
@@ -44,7 +55,38 @@ export default function Login({ onLoginSuccess }: LoginProps) {
 
   useEffect(() => {
     fetchSchools();
+    checkActiveSession();
   }, []);
+
+  const checkActiveSession = async () => {
+    if (!isSupabaseConfigured) return;
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session && session.user) {
+        setIsLoading(true);
+        // Check if employee record exists
+        const { data: emp, error } = await supabase
+          .from('emp')
+          .select('*')
+          .eq('email', session.user.email)
+          .maybeSingle();
+
+        if (emp) {
+          console.log('Google Session Auto-Login succeeded for:', session.user.email);
+          onLoginSuccess(emp, session);
+        } else {
+          console.log('Google Session Active, but no employee profile exists for:', session.user.email);
+          setGoogleUserEmail(session.user.email || '');
+          setGoogleUserName(session.user.user_metadata?.full_name || '');
+          setView('google-setup');
+        }
+      }
+    } catch (err) {
+      console.error('Error checking active session:', err);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   const fetchSchools = async () => {
     if (!isSupabaseConfigured) {
@@ -340,6 +382,185 @@ export default function Login({ onLoginSuccess }: LoginProps) {
     }
   };
 
+  const handleGoogleLogin = async () => {
+    setError('');
+    setIsLoading(true);
+
+    if (!isSupabaseConfigured) {
+      console.log('Simulating Google Login in Demo Mode...');
+      setTimeout(() => {
+        // Check if we already have a saved demo Google user session
+        const demoEmail = 'GermanGtx366@gmail.com';
+        const savedGoogleUser = localStorage.getItem('demo_google_user');
+        
+        if (savedGoogleUser) {
+          try {
+            const parsed = JSON.parse(savedGoogleUser);
+            setSuccess('Google Login simulated successfully!');
+            onLoginSuccess(parsed, { user: parsed });
+            setIsLoading(false);
+            return;
+          } catch (e) {
+            localStorage.removeItem('demo_google_user');
+          }
+        }
+
+        // First-time simulation: switch to setups screen
+        setGoogleUserEmail(demoEmail);
+        setGoogleUserName('German (Google Admin)');
+        setView('google-setup');
+        setIsLoading(false);
+      }, 1000);
+      return;
+    }
+
+    try {
+      console.log('Initiating Supabase Google OAuth sign-in...');
+      const { error: oauthError } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: `${window.location.origin}/`,
+        },
+      });
+
+      if (oauthError) throw oauthError;
+    } catch (err: any) {
+      console.error('Google OAuth initialization failed:', err);
+      setError(err.message || 'Failed to initialize Google Login');
+      setIsLoading(false);
+    }
+  };
+
+  const handleGoogleSetupSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setIsLoading(true);
+
+    try {
+      if (!isSupabaseConfigured) {
+        let newUser: any = {
+          id: Math.floor(Math.random() * 10000),
+          name: googleUserName,
+          email: googleUserEmail,
+          cnic: googleSetupData.cnic,
+          role: googleSetupData.role,
+          emis: googleSetupData.emis,
+          designation: googleSetupData.designation,
+          is_active: true,
+        };
+
+        if (googleSetupData.role === 'admin') {
+          setSchools(prev => [
+            ...prev,
+            {
+              id: Math.floor(Math.random() * 10000),
+              name: googleSetupData.schoolName,
+              emis_code: googleSetupData.emis,
+              address: googleSetupData.location || null,
+              phone: null,
+              is_active: true,
+              created_at: new Date().toISOString(),
+            }
+          ]);
+        }
+
+        localStorage.setItem('demo_google_user', JSON.stringify(newUser));
+        setSuccess('Account profile created successfully!');
+        setIsLoading(false);
+        onLoginSuccess(newUser, { user: newUser });
+        return;
+      }
+
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session || !session.user) {
+        throw new Error('No active auth session. Please try signing in again.');
+      }
+
+      const userEmail = session.user.email;
+      if (!userEmail) {
+        throw new Error('No email found in Google Auth session.');
+      }
+
+      if (googleSetupData.role === 'admin') {
+        // 1. Create School
+        const { error: schoolError } = await supabase
+          .from('schools')
+          .insert({
+            id: Math.floor(Math.random() * 2147483647),
+            emis_code: googleSetupData.emis,
+            name: googleSetupData.schoolName,
+            circle_name: googleSetupData.circle,
+            location: googleSetupData.location,
+          });
+
+        if (schoolError) throw new Error(`School Registration Failed: ${schoolError.message}`);
+
+        // 2. Create Admin Employee
+        const { error: empError } = await supabase
+          .from('emp')
+          .insert({
+            id: Math.floor(Math.random() * 2147483647),
+            name: googleUserName,
+            email: userEmail,
+            cnic: googleSetupData.cnic,
+            role: 'admin',
+            emis: googleSetupData.emis,
+            designation: googleSetupData.designation,
+            is_active: true
+          });
+
+        if (empError) throw new Error(`Admin Account Creation Failed: ${empError.message}`);
+      } else {
+        // Create Teacher Employee
+        const { error: empError } = await supabase
+          .from('emp')
+          .insert({
+            id: Math.floor(Math.random() * 2147483647),
+            name: googleUserName,
+            email: userEmail,
+            cnic: googleSetupData.cnic,
+            role: 'teacher',
+            emis: googleSetupData.emis,
+            designation: googleSetupData.designation,
+            is_active: true
+          });
+
+        if (empError) throw new Error(`Staff Account Creation Failed: ${empError.message}`);
+      }
+
+      // Fetch user profile from emp
+      const { data: finalEmp, error: fetchError } = await supabase
+        .from('emp')
+        .select('*')
+        .eq('email', userEmail)
+        .maybeSingle();
+
+      if (fetchError || !finalEmp) {
+        throw new Error('Profile creation succeeded, but profile sync failed. Please try reloading the page.');
+      }
+
+      setSuccess('Profile initialized successfully!');
+      onLoginSuccess(finalEmp, session);
+    } catch (err: any) {
+      setError(err.message || 'Profile setup failed');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleGoogleSetupCancel = async () => {
+    setError('');
+    setSuccess('');
+    setIsLoading(true);
+    
+    if (isSupabaseConfigured) {
+      await supabase.auth.signOut();
+    }
+    
+    setView('login');
+    setIsLoading(false);
+  };
+
   const handleResetPassword = async (e: FormEvent) => {
     e.preventDefault();
     setError('');
@@ -410,7 +631,6 @@ export default function Login({ onLoginSuccess }: LoginProps) {
           <div className="mb-10 text-center">
             <h2 
               className="text-2xl font-light tracking-[0.2em] uppercase text-slate-900 dark:text-white mb-2"
-              style={{ color: '#153569' }}
             >
               {view === 'signup' ? 'School Registration' : view === 'staff-signup' ? 'Staff Enrollment' : 'Attendance System'}
             </h2>
@@ -452,8 +672,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
                     value={cnic}
                     onChange={(e) => setCnic(e.target.value)}
                     placeholder="XXXXX-XXXXXXX-X or email@domain.com"
-                    className="w-full bg-background border border-border px-4 py-3 text-sm focus:outline-none focus:border-[#10b981] text-slate-900 dark:text-white transition-colors"
-                    style={{ backgroundColor: '#c7e9f4', color: '#8b1f06' }}
+                    className="w-full bg-slate-50 dark:bg-[#020617] border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#10b981] text-slate-900 dark:text-white transition-all duration-350"
                     required
                   />
                 </div>
@@ -474,8 +693,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       placeholder="••••••••"
-                      className="w-full bg-background border border-border px-4 py-3 text-sm focus:outline-none focus:border-[#10b981] text-slate-900 dark:text-white transition-colors"
-                      style={{ backgroundColor: '#cce8ef', color: '#8b1f06' }}
+                      className="w-full bg-slate-50 dark:bg-[#020617] border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#10b981] text-slate-900 dark:text-white transition-all duration-350"
                       required
                     />
                     <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-600 hover:text-[#10b981]">
@@ -490,6 +708,27 @@ export default function Login({ onLoginSuccess }: LoginProps) {
                   {isLoading ? "Verifying..." : "Initialize Session"}
                 </button>
               </form>
+
+              <div className="relative flex py-2 items-center">
+                <div className="flex-grow border-t border-slate-150 dark:border-slate-800"></div>
+                <span className="flex-shrink mx-4 text-[9px] text-slate-400 font-mono tracking-widest uppercase">OR</span>
+                <div className="flex-grow border-t border-slate-150 dark:border-slate-800"></div>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleGoogleLogin}
+                disabled={isLoading}
+                className="w-full flex items-center justify-center gap-3 bg-white dark:bg-[#020617] text-slate-800 dark:text-white border border-slate-200 dark:border-[#1e293b] rounded-xl py-3.5 text-xs font-bold uppercase tracking-wider hover:bg-slate-50 dark:hover:bg-slate-900 transition-all shadow-md outline-none cursor-pointer"
+              >
+                <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
+                  <path fill="#EA4335" d="M12 5.04c1.62 0 3.08.56 4.22 1.66l3.15-3.15C17.47 1.8 14.96 1 12 1 7.35 1 3.4 3.65 1.5 7.5l3.6 2.8C6.01 7.37 8.74 5.04 12 5.04z" />
+                  <path fill="#4285F4" d="M23.52 12.27c0-.82-.07-1.61-.21-2.38H12v4.5h6.48c-.28 1.48-1.12 2.73-2.38 3.58l3.68 2.85c2.15-1.98 3.4-4.9 3.4-8.55z" />
+                  <path fill="#FBBC05" d="M5.1 14.7c-.24-.7-.37-1.46-.37-2.25s.13-1.55.37-2.25L1.5 7.4C.54 9.3 0 11.45 0 13.7s.54 4.4 1.5 6.3l3.6-2.8z" />
+                  <path fill="#34A853" d="M12 23c3.24 0 5.96-1.08 7.95-2.92l-3.68-2.85c-.99.66-2.27 1.07-4.27 1.07-3.26 0-5.99-2.33-6.98-5.46L1.42 16.14C3.32 20.04 7.28 23 12 23z" />
+                </svg>
+                {isLoading ? "Signing In..." : "Log In with Google"}
+              </button>
 
               <div className="text-center pt-4 border-t border-slate-100 dark:border-slate-800 flex flex-col gap-3">
                 <p className="text-[10px] text-slate-400 uppercase tracking-widest leading-none">Enrollment Gate</p>
@@ -722,6 +961,184 @@ export default function Login({ onLoginSuccess }: LoginProps) {
                   className="w-full text-[10px] text-slate-500 uppercase tracking-widest font-bold py-2 hover:text-slate-900 dark:hover:text-white transition-colors"
                 >
                   Cancel
+                </button>
+              </div>
+            </form>
+          ) : view === 'google-setup' ? (
+            <form onSubmit={handleGoogleSetupSubmit} className="space-y-4 max-h-[60vh] overflow-y-auto pr-2 custom-scrollbar">
+              <div className="text-center mb-4">
+                <p className="text-xs text-[#10b981] font-mono uppercase tracking-widest font-bold">Google Profile Setup</p>
+                <p className="text-[10px] text-slate-400 mt-1 uppercase tracking-widest leading-none truncate">{googleUserEmail}</p>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-[9px] font-bold text-slate-500 uppercase tracking-widest ml-1">Establish Link As</label>
+                <div className="grid grid-cols-2 gap-3 mb-3">
+                  {[
+                    { id: 'teacher', label: 'Teacher / Staff' },
+                    { id: 'admin', label: 'Admin / Principal' }
+                  ].map((roleOption) => (
+                    <button
+                      key={roleOption.id}
+                      type="button"
+                      onClick={() => setGoogleSetupData({
+                        ...googleSetupData,
+                        role: roleOption.id as 'admin' | 'teacher',
+                        emis: '', 
+                      })}
+                      className={`py-3 text-[10px] uppercase font-bold tracking-widest border transition-all rounded-xl ${googleSetupData.role === roleOption.id ? 'bg-[#10b981]/10 border-[#10b981] text-[#10b981]' : 'bg-slate-50 dark:bg-slate-800/50 border-slate-200 dark:border-slate-800 text-slate-400'}`}
+                    >
+                      {roleOption.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {googleSetupData.role === 'admin' ? (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1">
+                      <label className="text-[9px] font-bold text-slate-500 uppercase tracking-tighter ml-1">School Name</label>
+                      <input
+                        type="text"
+                        value={googleSetupData.schoolName}
+                        onChange={(e) => setGoogleSetupData({...googleSetupData, schoolName: e.target.value})}
+                        placeholder="Enter school name"
+                        className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 px-3 py-2 text-xs focus:outline-none focus:border-[#10b981] text-slate-900 dark:text-white transition-colors"
+                        required
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[9px] font-bold text-slate-500 uppercase tracking-tighter ml-1">EMIS Code</label>
+                      <input
+                        type="text"
+                        value={googleSetupData.emis}
+                        onChange={(e) => setGoogleSetupData({...googleSetupData, emis: e.target.value})}
+                        placeholder="18xxx"
+                        className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 px-3 py-2 text-xs focus:outline-none focus:border-[#10b981] text-slate-900 dark:text-white transition-colors"
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1">
+                      <label className="text-[9px] font-bold text-slate-500 uppercase tracking-tighter ml-1">Circle Name</label>
+                      <input
+                        type="text"
+                        value={googleSetupData.circle}
+                        onChange={(e) => setGoogleSetupData({...googleSetupData, circle: e.target.value})}
+                        placeholder="Circle/Zone"
+                        className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 px-3 py-2 text-xs focus:outline-none focus:border-[#10b981] text-slate-900 dark:text-white transition-colors"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[9px] font-bold text-slate-500 uppercase tracking-tighter ml-1">Location</label>
+                      <input
+                        type="text"
+                        value={googleSetupData.location}
+                        onChange={(e) => setGoogleSetupData({...googleSetupData, location: e.target.value})}
+                        placeholder="City/Area"
+                        className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 px-3 py-2 text-xs focus:outline-none focus:border-[#10b981] text-slate-900 dark:text-white transition-colors"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[9px] font-bold text-slate-500 uppercase tracking-widest ml-1">Admin Designation</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {['PSHT', 'Principal', 'Headmaster'].map((des) => (
+                        <button
+                          key={des}
+                          type="button"
+                          onClick={() => setGoogleSetupData({...googleSetupData, designation: des})}
+                          className={`py-2 text-[8px] uppercase font-bold tracking-widest border transition-all rounded-lg ${googleSetupData.designation === des ? 'bg-[#10b981]/10 border-[#10b981] text-[#10b981]' : 'bg-slate-50 dark:bg-slate-800/50 border-slate-200 dark:border-slate-800 text-slate-400'}`}
+                        >
+                          {des}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="space-y-1.5">
+                    <label className="text-[9px] font-bold text-slate-500 uppercase tracking-widest ml-1">Select Your School</label>
+                    <div className="relative">
+                      <select 
+                        value={googleSetupData.emis}
+                        onChange={(e) => setGoogleSetupData({...googleSetupData, emis: e.target.value})}
+                        className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 px-4 py-3 text-xs focus:outline-none focus:border-[#10b981] text-slate-900 dark:text-white transition-colors appearance-none"
+                        required
+                      >
+                        <option value="">Select Institution...</option>
+                        {schools.map(school => (
+                          <option key={school.emis_code} value={school.emis_code} className="bg-white dark:bg-[#0f172a]">
+                            {school.name} ({school.emis_code})
+                          </option>
+                        ))}
+                      </select>
+                      <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-slate-500">
+                        <ChevronDown className="w-4 h-4" />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-[9px] font-bold text-slate-500 uppercase tracking-widest ml-1">Designation</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {['PST', 'SPST', 'Chawkidar'].map((des) => (
+                        <button
+                          key={des}
+                          type="button"
+                          onClick={() => setGoogleSetupData({...googleSetupData, designation: des})}
+                          className={`py-2 text-[8px] uppercase font-bold tracking-widest border transition-all rounded-lg ${googleSetupData.designation === des ? 'bg-[#10b981]/10 border-[#10b981] text-[#10b981]' : 'bg-slate-50 dark:bg-slate-800/50 border-slate-200 dark:border-slate-800 text-slate-400'}`}
+                        >
+                          {des}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-4">
+                <div className="space-y-1">
+                  <label className="text-[9px] font-bold text-slate-500 uppercase tracking-widest ml-1">Confirm Identity Fields</label>
+                  <input
+                    type="text"
+                    value={googleUserName}
+                    onChange={(e) => setGoogleUserName(e.target.value)}
+                    placeholder="Full Name (per CNIC)"
+                    className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 px-4 py-3 text-xs focus:outline-none focus:border-[#10b981] text-slate-900 dark:text-white transition-colors"
+                    required
+                  />
+                </div>
+                <div className="space-y-1">
+                  <input
+                    type="text"
+                    value={googleSetupData.cnic}
+                    onChange={(e) => setGoogleSetupData({...googleSetupData, cnic: e.target.value})}
+                    placeholder="CNIC (XXXXX-XXXXXXX-X)"
+                    className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 px-4 py-3 text-xs focus:outline-none focus:border-[#10b981] text-slate-900 dark:text-white transition-colors"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div className="pt-4 space-y-3">
+                <button
+                  type="submit" disabled={isLoading}
+                  className={`w-full bg-[#10b981] text-[#020617] font-bold py-4 text-[10px] uppercase tracking-[0.2em] hover:bg-[#34d399] transition-all ${isLoading ? 'opacity-50 cursor-not-allowed' : ''} shadow-lg shadow-emerald-500/10`}
+                >
+                  {isLoading ? "Setting Up Profile..." : "Complete Setup & Sign In"}
+                </button>
+                <button 
+                  type="button"
+                  onClick={handleGoogleSetupCancel}
+                  className="w-full text-[10px] text-slate-500 uppercase tracking-widest font-bold py-2 hover:text-slate-900 dark:hover:text-white transition-colors"
+                >
+                  Cancel & Sign Out
                 </button>
               </div>
             </form>
