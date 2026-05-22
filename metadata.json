@@ -1,6 +1,6 @@
 {
-  "name": "EduScan Pro",
-  "description": "Advanced School Attendance and Resource Management System for GPS No. Sawaldher.",
+  "name": "School MIS",
+  "description": "EduScan Pro: Advanced School Attendance, Exam, and Resource Management System for GPS No. Sawaldher.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

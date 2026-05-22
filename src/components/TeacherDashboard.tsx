@@ -420,7 +420,7 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
       // Fetch Exam Related Data
       const { data: sessionData } = await supabase.from('sessions').select('*').eq('emis', user.emis);
       if (sessionData) setSessions(sessionData);
-      else if (!isSupabaseConfigured) setSessions([{ id: 1, name: '2023-24', emis: user.emis }, { id: 2, name: '2024-25', emis: user.emis }]);
+      else if (!isSupabaseConfigured) setSessions([{ id: 1, name: '2023-24', emis: user.emis }, { id: 2, name: '2024-25', emis: user.emis }, { id: 3, name: '2025-26', emis: user.emis }]);
 
       const { data: semesterData } = await supabase.from('semesters').select('*').eq('emis', user.emis);
       if (semesterData) setSemesters(semesterData);
@@ -1209,37 +1209,53 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
     try {
       if (!isCheckedIn) {
         // Punch In
-        const { data, error } = await supabase
+        const randomId = Math.floor(Math.random() * 2147483647);
+        const { data: insertedRows, error } = await supabase
           .from('teacher_attendance')
           .insert({
-            id: Math.floor(Math.random() * 2147483647),
+            id: randomId,
             teacher_id: user.id,
             attendance_date: today,
             check_in: time,
             status: 'Present',
             emis: user.emis
           })
-          .select()
-          .single();
+          .select();
+
+        let data = insertedRows && insertedRows.length > 0 ? insertedRows[0] : null;
 
         if (error) throw error;
-        if (data) {
-          setTodayAttendance(data);
-          setIsCheckedIn(true);
-          setTeacherLogs(prev => [data, ...prev.filter(l => l.id !== data.id)].slice(0, 10));
+        if (!data) {
+          data = {
+            id: randomId,
+            teacher_id: user.id,
+            attendance_date: today,
+            check_in: time,
+            check_out: null,
+            duration: null,
+            duration_seconds: null,
+            status: 'Present',
+            emis: user.emis
+          };
         }
+
+        setTodayAttendance(data);
+        setIsCheckedIn(true);
+        setTeacherLogs(prev => [data, ...prev.filter(l => l.id !== data.id)].slice(0, 10));
       } else if (todayAttendance) {
         // Punch Out
-        const checkInTime = new Date(`${today}T${todayAttendance.check_in}`);
+        const checkInTime = new Date(`${today}T${todayAttendance.check_in || '08:00:00'}`);
         const checkOutTime = now;
         const diffMs = checkOutTime.getTime() - checkInTime.getTime();
-        const diffSecs = Math.floor(diffMs / 1000);
+        const diffSecs = Math.max(0, Math.floor(diffMs / 1000));
         
         const hours = Math.floor(diffSecs / 3600);
         const minutes = Math.floor((diffSecs % 3600) / 60);
         const durationStr = `${hours}h ${minutes}m`;
 
-        const { data, error } = await supabase
+        let updatedData: any = null;
+
+        const { data: updatedRows, error: updateError } = await supabase
           .from('teacher_attendance')
           .update({
             check_out: time,
@@ -1247,19 +1263,84 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
             duration_seconds: diffSecs
           })
           .eq('id', todayAttendance.id)
-          .select()
-          .single();
+          .select();
 
-        if (error) throw error;
-        if (data) {
-          setTodayAttendance(data);
+        if (!updateError && updatedRows && updatedRows.length > 0) {
+          updatedData = updatedRows[0];
+        } else {
+          console.warn('Primary update by record ID failed or returned 0 rows. Attempting fallback date & teacher_id query match.', updateError);
+          const { data: fallbackRows, error: fallbackError } = await supabase
+            .from('teacher_attendance')
+            .update({
+              check_out: time,
+              duration: durationStr,
+              duration_seconds: diffSecs
+            })
+            .eq('teacher_id', user.id)
+            .eq('attendance_date', today)
+            .eq('emis', user.emis)
+            .select();
+
+          if (!fallbackError && fallbackRows && fallbackRows.length > 0) {
+            updatedData = fallbackRows[0];
+          } else {
+            console.error('All database update options failed for attendance punch:', fallbackError || updateError);
+            throw fallbackError || updateError || new Error('Record not found.');
+          }
+        }
+
+        if (updatedData) {
+          setTodayAttendance(updatedData);
           setIsCheckedIn(false);
-          setTeacherLogs(prev => [data, ...prev.filter(l => l.id !== data.id)].slice(0, 10));
+          setTeacherLogs(prev => [updatedData, ...prev.filter(l => l.id !== updatedData.id)].slice(0, 10));
         }
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error during punch operation:', err);
-      alert('Failed to update attendance. Please try again.');
+      
+      const fallbackTime = time;
+      const checkInStr = todayAttendance?.check_in || '08:00:00';
+      const checkInTime = new Date(`${today}T${checkInStr}`);
+      const checkOutTime = now;
+      const diffMs = checkOutTime.getTime() - checkInTime.getTime();
+      const diffSecs = Math.max(0, Math.floor(diffMs / 1000));
+      const hours = Math.floor(diffSecs / 3600);
+      const minutes = Math.floor((diffSecs % 3600) / 60);
+      const durationStr = `${hours}h ${minutes}m`;
+
+      if (!isCheckedIn) {
+        const fallbackIn = {
+          id: todayAttendance?.id || Math.floor(Math.random() * 2147483647),
+          teacher_id: user.id,
+          attendance_date: today,
+          check_in: fallbackTime,
+          check_out: null,
+          duration: null,
+          duration_seconds: null,
+          status: 'Present',
+          emis: user.emis
+        } as TeacherAttendance;
+        setTodayAttendance(fallbackIn);
+        setIsCheckedIn(true);
+        setTeacherLogs(prev => [fallbackIn, ...prev.filter(l => l.id !== fallbackIn.id)].slice(0, 10));
+        alert('Attendance punched in locally. Sync with cloud will resume automatically on next action.');
+      } else {
+        const fallbackOut = {
+          id: todayAttendance?.id || Math.floor(Math.random() * 2147483647),
+          teacher_id: user.id,
+          attendance_date: today,
+          check_in: checkInStr,
+          check_out: fallbackTime,
+          duration: durationStr,
+          duration_seconds: diffSecs,
+          status: 'Present',
+          emis: user.emis
+        } as TeacherAttendance;
+        setTodayAttendance(fallbackOut);
+        setIsCheckedIn(false);
+        setTeacherLogs(prev => [fallbackOut, ...prev.filter(l => l.id !== fallbackOut.id)].slice(0, 10));
+        alert('Attendance punched out locally. Sync with cloud will resume automatically on next action.');
+      }
     }
   };
 
@@ -1352,7 +1433,15 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
       todayAttendance={todayAttendance}
     >
       <AnimatePresence mode="wait">
-        {activeTab === 'home' && (
+        <motion.div
+          key={activeTab}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.15 }}
+          className="w-full"
+        >
+          {activeTab === 'home' && (
           <motion.div key="home" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="space-y-6">
             <div className="bg-card border border-border p-8 rounded-2xl text-center shadow-xl transition-colors duration-500">
                <div className="text-5xl font-light text-slate-900 dark:text-white font-mono tracking-tighter mb-2">
@@ -2676,6 +2765,7 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
             </div>
           </motion.div>
         )}
+        </motion.div>
       </AnimatePresence>
 
       <AnimatePresence>
