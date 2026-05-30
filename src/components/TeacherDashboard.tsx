@@ -649,12 +649,18 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
           Present: [], Absent: [], Sick: [], Leave: []
         };
 
+        const todayAttendance: Record<number, 'Present' | 'Absent' | 'Sick' | 'Leave'> = {};
+
         students.forEach(student => {
-          const record = attData.find(r => r.student_id === student.id);
+          const record = attData.find(r => Number(r.student_id) === Number(student.id));
           const status = (record?.status as any) || 'Present';
           if (counts[status] !== undefined) counts[status]++;
           categorized[status].push(student);
+          todayAttendance[student.id] = status;
         });
+
+        // Set the active records mapping so toggling "Mark" loads the previously saved statuses
+        setAttendanceRecords(todayAttendance);
 
         setReportData({
           total, boys, girls,
@@ -705,7 +711,7 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
         };
 
         classStudents.forEach(student => {
-          const record = data.find(r => r.student_id === student.id);
+          const record = data.find(r => Number(r.student_id) === Number(student.id));
           const status = (record?.status as any) || 'Present';
           if (counts[status] !== undefined) counts[status]++;
           categorized[status].push(student);
@@ -827,6 +833,7 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
         presentPercentage,
         categorizedStudents: categorized
       });
+      setAttendanceMode('report');
       setShowReport(true);
       
       // Removed alert for a smoother UI experience
