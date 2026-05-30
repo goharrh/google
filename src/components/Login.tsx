@@ -7,17 +7,21 @@ import { School } from '../types';
 
 interface LoginProps {
   onLoginSuccess: (user: any, session?: any) => void;
+  isRecovery?: boolean;
+  onCancelRecovery?: () => void;
 }
 
-export default function Login({ onLoginSuccess }: LoginProps) {
+export default function Login({ onLoginSuccess, isRecovery, onCancelRecovery }: LoginProps) {
   const [cnic, setCnic] = useState('');
   const [password, setPassword] = useState('');
   const [resetEmail, setResetEmail] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-  const [view, setView] = useState<'login' | 'forgot-password' | 'signup' | 'staff-signup' | 'google-setup'>('login');
+  const [view, setView] = useState<'login' | 'forgot-password' | 'signup' | 'staff-signup' | 'google-setup' | 'reset-password'>('login');
   const [schools, setSchools] = useState<School[]>([]);
   const [googleUserEmail, setGoogleUserEmail] = useState('');
   const [googleUserName, setGoogleUserName] = useState('');
@@ -55,8 +59,12 @@ export default function Login({ onLoginSuccess }: LoginProps) {
 
   useEffect(() => {
     fetchSchools();
-    checkActiveSession();
-  }, []);
+    if (isRecovery) {
+      setView('reset-password');
+    } else {
+      checkActiveSession();
+    }
+  }, [isRecovery]);
 
   const checkActiveSession = async () => {
     if (!isSupabaseConfigured) return;
@@ -593,6 +601,97 @@ export default function Login({ onLoginSuccess }: LoginProps) {
     }
   };
 
+  const handleUpdatePasswordSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setSuccess('');
+    
+    if (newPassword !== confirmPassword) {
+      setError('Passwords do not match');
+      return;
+    }
+
+    if (newPassword.length < 6) {
+      setError('Password must be at least 6 characters');
+      return;
+    }
+
+    setIsLoading(true);
+
+    try {
+      if (!isSupabaseConfigured) {
+        setSuccess('Password updated successfully (Demo Mode)! Redirecting...');
+        setTimeout(() => {
+          setView('login');
+          if (onCancelRecovery) onCancelRecovery();
+          setIsLoading(false);
+        }, 1500);
+        return;
+      }
+
+      // Get the current session to ensure we are logged in with the recovery token
+      const { data: { session: currentSession } } = await supabase.auth.getSession();
+      
+      if (!currentSession || !currentSession.user) {
+        throw new Error('No active recovery session found. Please request a new reset link.');
+      }
+
+      const email = currentSession.user.email;
+
+      // 1. Update password in Supabase Auth
+      const { error: authError } = await supabase.auth.updateUser({
+        password: newPassword,
+      });
+
+      if (authError) throw authError;
+
+      // 2. Update hashed password in the `emp` database table so standard login also works seamlessly
+      if (email) {
+        const hashedPassword = bcrypt.hashSync(newPassword, 10);
+        const { error: dbError } = await supabase
+          .from('emp')
+          .update({ password: hashedPassword })
+          .eq('email', email);
+
+        if (dbError) {
+          console.error('Failed to update password in custom database:', dbError);
+        }
+      }
+
+      setSuccess('Your password has been successfully updated.');
+      
+      try {
+        sessionStorage.removeItem('is_recovery_flow');
+      } catch (e) {}
+
+      // Clean up the URL (remove hash tags and recovery path to prevent re-triggering recovery mode on refresh)
+      if (window.history && window.history.replaceState) {
+        window.history.replaceState(null, '', window.location.origin);
+      }
+
+      // Automatically sign the user in using their updated session
+      const { data: emp, error: empFetchError } = await supabase
+        .from('emp')
+        .select('*')
+        .eq('email', email)
+        .maybeSingle();
+
+      setTimeout(() => {
+        setIsLoading(false);
+        if (emp) {
+          onLoginSuccess(emp, currentSession);
+        } else {
+          setView('login');
+          if (onCancelRecovery) onCancelRecovery();
+        }
+      }, 1500);
+
+    } catch (err: any) {
+      setError(err.message || 'Failed to update password');
+      setIsLoading(false);
+    }
+  };
+
   return (
     <div className="min-h-screen flex flex-col md:flex-row bg-background text-foreground transition-colors duration-500">
       <div className="absolute inset-0 bg-[linear-gradient(to_right,#e2e8f0_1px,transparent_1px),linear-gradient(to_bottom,#e2e8f0_1px,transparent_1px)] dark:bg-[linear-gradient(to_right,#1e293b_1px,transparent_1px),linear-gradient(to_bottom,#1e293b_1px,transparent_1px)] bg-[size:40px_40px] opacity-[0.3] dark:opacity-[0.1] pointer-events-none" />
@@ -632,10 +731,10 @@ export default function Login({ onLoginSuccess }: LoginProps) {
             <h2 
               className="text-2xl font-light tracking-[0.2em] uppercase text-slate-900 dark:text-white mb-2"
             >
-              {view === 'signup' ? 'School Registration' : view === 'staff-signup' ? 'Staff Enrollment' : 'Attendance System'}
+              {view === 'signup' ? 'School Registration' : view === 'staff-signup' ? 'Staff Enrollment' : view === 'reset-password' ? 'Update Credentials' : 'Attendance System'}
             </h2>
             <p className="text-slate-400 dark:text-slate-500 text-[10px] uppercase tracking-widest">
-              {view === 'login' ? 'Enter Access Codes' : view === 'signup' ? 'Establish School Instance' : view === 'staff-signup' ? 'Join Your School Terminal' : 'Reset Access Credentials'}
+              {view === 'login' ? 'Enter Access Codes' : view === 'signup' ? 'Establish School Instance' : view === 'staff-signup' ? 'Join Your School Terminal' : view === 'reset-password' ? 'Create New Secure Password' : 'Reset Access Credentials'}
             </p>
           </div>
 
@@ -1139,6 +1238,64 @@ export default function Login({ onLoginSuccess }: LoginProps) {
                   className="w-full text-[10px] text-slate-500 uppercase tracking-widest font-bold py-2 hover:text-slate-900 dark:hover:text-white transition-colors"
                 >
                   Cancel & Sign Out
+                </button>
+              </div>
+            </form>
+          ) : view === 'reset-password' ? (
+            <form onSubmit={handleUpdatePasswordSubmit} className="space-y-6">
+              <div className="space-y-1.5">
+                <label className="text-[10px] font-bold text-slate-600 dark:text-slate-400 uppercase tracking-tighter">New Password</label>
+                <div className="relative">
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="Enter new secure password"
+                    className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 px-4 py-3 text-sm focus:outline-none focus:border-[#10b981] text-slate-900 dark:text-white transition-colors"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-[10px] font-bold text-slate-600 dark:text-slate-400 uppercase tracking-tighter">Confirm New Password</label>
+                <input
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="Confirm new password"
+                  className="w-full bg-slate-50 dark:bg-[#020617] border border-slate-200 dark:border-slate-800 px-4 py-3 text-sm focus:outline-none focus:border-[#10b981] text-slate-900 dark:text-white transition-colors"
+                  required
+                />
+              </div>
+
+              <div className="flex flex-col gap-3">
+                <button
+                  type="submit" disabled={isLoading}
+                  className={`w-full bg-[#10b981] text-[#020617] font-bold py-4 text-xs uppercase tracking-[0.2em] hover:bg-[#34d399] transition-all ${isLoading ? 'opacity-50 cursor-not-allowed' : ''} shadow-lg shadow-emerald-500/10`}
+                >
+                  {isLoading ? "Updating Password..." : "Update Password"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setView('login');
+                    setError('');
+                    setSuccess('');
+                    if (onCancelRecovery) {
+                      onCancelRecovery();
+                    }
+                  }}
+                  className="w-full py-4 text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em] hover:text-slate-900 dark:hover:text-white transition-colors"
+                >
+                  Return to Login
                 </button>
               </div>
             </form>

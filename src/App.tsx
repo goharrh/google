@@ -6,6 +6,8 @@ import { supabase } from './lib/supabase';
 import { Employee } from './types';
 import { ThemeProvider } from './context/ThemeContext';
 
+const pendingProfileFetches = new Map<string, Promise<boolean>>();
+
 export default function App() {
   const [session, setSession] = useState<any>(null);
   const [userProfile, setUserProfile] = useState<Employee | null>(null);
@@ -13,6 +15,15 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
+  const [isRecovery, setIsRecovery] = useState(() => {
+    try {
+      return window.location.hash.includes('type=recovery') || 
+             window.location.pathname.includes('reset-password') ||
+             sessionStorage.getItem('is_recovery_flow') === 'true';
+    } catch {
+      return false;
+    }
+  });
 
   const isSupabaseConfigured = !!(import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_URL !== 'undefined');
 
@@ -68,8 +79,32 @@ export default function App() {
           if (!mounted) return;
           console.log('App: Auth state change event:', event);
           setSession(session);
+
+          let isRecoveryFlow = false;
+          try {
+            isRecoveryFlow = event === 'PASSWORD_RECOVERY' || 
+              window.location.hash.includes('type=recovery') || 
+              window.location.pathname.includes('reset-password') ||
+              sessionStorage.getItem('is_recovery_flow') === 'true';
+          } catch {
+            isRecoveryFlow = false;
+          }
+
+          if (isRecoveryFlow) {
+            console.log('App: Intercepted password recovery flow.');
+            setIsRecovery(true);
+            setView('login');
+            setIsLoading(false);
+            return;
+          }
+
           if (session) {
             setProfileError(null);
+            if (isRecovery || isRecoveryFlow) {
+              setView('login');
+              setIsLoading(false);
+              return;
+            }
             const success = await fetchProfile(session.user.email!);
             if (success) {
               setView('dashboard');
@@ -113,52 +148,117 @@ export default function App() {
 
   const fetchProfile = async (email: string, attempt = 1): Promise<boolean> => {
     if (!isSupabaseConfigured) return false;
-    console.log(`App: Fetching profile for: ${email} (Attempt ${attempt})`);
-    try {
-      setProfileError(null);
-      
-      const fetchPromise = supabase
-        .from('emp')
-        .select('*')
-        .eq('email', email)
-        .maybeSingle();
-      
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Profile sync timeout - database response delayed.')), 30000)
-      );
+    if (!email || email.trim() === '') {
+      console.warn('App: fetchProfile received empty email context.');
+      return false;
+    }
 
-      console.time(`fetchProfile-${attempt}`);
-      const { data, error } = await (Promise.race([fetchPromise, timeoutPromise]) as any);
-      console.timeEnd(`fetchProfile-${attempt}`);
+    const emailTrimmed = email.trim().toLowerCase();
+    const cacheKey = `${emailTrimmed}-${attempt}`;
 
-      if (error) {
-        console.error('App: Supabase error fetching profile:', error);
-        throw error;
-      }
-      if (data) {
-        console.log('App: Profile fetched successfully:', data.role);
-        setUserProfile(data);
+    if (pendingProfileFetches.has(cacheKey)) {
+      console.log(`App: Reusing active connection query for ${emailTrimmed} (Attempt ${attempt})`);
+      return pendingProfileFetches.get(cacheKey)!;
+    }
+
+    const runFetch = async (): Promise<boolean> => {
+      console.log(`App: Fetching profile for: ${emailTrimmed} (Attempt ${attempt})`);
+      try {
         setProfileError(null);
-        return true;
-      } else {
-        console.warn('App: No profile found in emp table for email:', email);
+        
+        // Use simpler select with limit(1) instead of maybeSingle() to bypass potential Postgres/PostgREST RLS plan locks
+        const fetchPromise = supabase
+          .from('emp')
+          .select('*')
+          .eq('email', emailTrimmed)
+          .limit(1);
+        
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Profile sync timeout - database response delayed.')), 10000)
+        );
+
+        console.time(`fetchProfile-${emailTrimmed}-${attempt}`);
+        const result = await Promise.race([fetchPromise, timeoutPromise]) as any;
+        console.timeEnd(`fetchProfile-${emailTrimmed}-${attempt}`);
+
+        const data = result?.data;
+        const error = result?.error;
+
+        if (error) {
+          console.error('App: Supabase error fetching profile:', error);
+          throw error;
+        }
+
+        if (data && data.length > 0) {
+          const profile = data[0];
+          console.log('App: Profile fetched successfully:', profile.role);
+          try {
+            // Write to local cache for resilient offline-fallback
+            localStorage.setItem(`profile_${emailTrimmed}`, JSON.stringify(profile));
+          } catch (e) {
+            console.error('App: Failed to cache to localStorage:', e);
+          }
+          setUserProfile(profile);
+          setProfileError(null);
+          return true;
+        } else {
+          console.warn('App: No profile found in emp table for email:', emailTrimmed);
+          if (attempt < 3) {
+            console.log(`App: Retrying profile fetch in ${attempt * 2000}ms...`);
+            await new Promise(r => setTimeout(r, attempt * 2000));
+            return fetchProfile(email, attempt + 1);
+          }
+
+          // Let's try falling back to local cache before fully failing!
+          try {
+            const cached = localStorage.getItem(`profile_${emailTrimmed}`);
+            if (cached) {
+              const parsed = JSON.parse(cached);
+              console.warn('App: Using local fallback profile for missing record in database:', parsed.role);
+              setUserProfile(parsed);
+              setProfileError(null);
+              return true;
+            }
+          } catch (cacheErr) {
+            console.error('App: Failed to read from profile cache fallback', cacheErr);
+          }
+
+          setProfileError(`Account synchronization failed: No employee record found for ${emailTrimmed}. Please contact your administrator.`);
+          return false;
+        }
+      } catch (err: any) {
+        console.error('App: Error fetching profile:', err);
+
+        // Fall back to local cache if we fail on errors/timeouts
+        try {
+          const cached = localStorage.getItem(`profile_${emailTrimmed}`);
+          if (cached) {
+            const parsed = JSON.parse(cached);
+            console.warn('App: Dynamic SQL Fallback active. Restoring from cached local profile:', parsed.role);
+            setUserProfile(parsed);
+            setProfileError(null);
+            return true;
+          }
+        } catch (cacheErr) {
+          console.error('App: Failed to read from profile cache fallback', cacheErr);
+        }
+
         if (attempt < 3) {
-          console.log(`App: Retrying profile fetch in ${attempt * 2000}ms...`);
+          console.log(`App: Retrying profile fetch after error in ${attempt * 2000}ms...`);
           await new Promise(r => setTimeout(r, attempt * 2000));
           return fetchProfile(email, attempt + 1);
         }
-        setProfileError(`Account synchronization failed: No employee record found for ${email}. Please contact your administrator.`);
+        setProfileError(`Link lost: ${err.message || 'Unknown protocol error'}`);
         return false;
       }
-    } catch (err: any) {
-      console.error('App: Error fetching profile:', err);
-      if (attempt < 3) {
-        console.log(`App: Retrying profile fetch after error in ${attempt * 2000}ms...`);
-        await new Promise(r => setTimeout(r, attempt * 2000));
-        return fetchProfile(email, attempt + 1);
-      }
-      setProfileError(`Link lost: ${err.message || 'Unknown protocol error'}`);
-      return false;
+    };
+
+    const fetchPromiseWithCache = runFetch();
+    pendingProfileFetches.set(cacheKey, fetchPromiseWithCache);
+    try {
+      return await fetchPromiseWithCache;
+    } finally {
+      pendingProfileFetches.delete(cacheKey);
     }
   };
 
@@ -172,9 +272,18 @@ export default function App() {
 
   const handleLoginSuccess = (user: any, session?: any) => {
     console.log('Login success handler called:', user.role);
+    try {
+      sessionStorage.removeItem('is_recovery_flow');
+    } catch (e) {}
+    setIsRecovery(false);
     setUserProfile(user);
     if (session) {
       setSession(session);
+      if (user && user.email) {
+        try {
+          localStorage.setItem(`profile_${user.email.trim().toLowerCase()}`, JSON.stringify(user));
+        } catch (e) {}
+      }
     } else if (!isSupabaseConfigured) {
       setSession({ user });
       localStorage.setItem('demo_user', JSON.stringify(user));
@@ -184,6 +293,10 @@ export default function App() {
   };
 
   const handleLogout = async () => {
+    try {
+      sessionStorage.removeItem('is_recovery_flow');
+    } catch (e) {}
+    setIsRecovery(false);
     await supabase.auth.signOut();
     localStorage.removeItem('demo_user');
     setSession(null);
@@ -218,7 +331,16 @@ export default function App() {
           </div>
         </div>
       ) : view === 'login' ? (
-        <Login onLoginSuccess={handleLoginSuccess} />
+        <Login 
+          onLoginSuccess={handleLoginSuccess} 
+          isRecovery={isRecovery}
+          onCancelRecovery={() => {
+            try {
+              sessionStorage.removeItem('is_recovery_flow');
+            } catch (e) {}
+            setIsRecovery(false);
+          }}
+        />
       ) : view === 'dashboard' ? (
         userProfile ? (
           userProfile.role === 'admin' ? (

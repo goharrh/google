@@ -1,21 +1,33 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GPS No. Sawaldher</title>
+    <script>
+      (function() {
+        try {
+          const hash = window.location.hash || '';
+          const search = window.location.search || '';
+          const pathname = window.location.pathname || '';
+          
+          if (
+            hash.includes('type=recovery') || 
+            search.includes('type=recovery') || 
+            pathname.includes('reset-password')
+          ) {
+            console.log('Early Detection: PASSWORD RECOVERY flow detected in head script.');
+            sessionStorage.setItem('is_recovery_flow', 'true');
+          }
+        } catch (e) {
+          console.error('Error in early recovery detection script:', e);
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
-
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
-
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
