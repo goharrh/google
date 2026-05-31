@@ -42,7 +42,7 @@ export default function DashboardLayout({
            style={{ backgroundImage: 'radial-gradient(#10b981 0.5px, transparent 0.5px)', backgroundSize: '24px 24px' }} />
       
       {/* Top Bar */}
-      <header className="sticky top-0 z-40 bg-card border-b border-border p-4 md:px-8 flex items-center justify-between transition-colors duration-500">
+      <header className="sticky top-0 z-40 bg-card border-b border-border p-2 md:p-3 px-3 md:px-5 flex items-center justify-between transition-colors duration-500">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 bg-emerald-500 rounded-lg flex items-center justify-center transform rotate-45">
             <Shield className="w-5 h-5 text-slate-900 -rotate-45" />
@@ -108,13 +108,13 @@ export default function DashboardLayout({
                 <div className="flex flex-col truncate">
                   <h2 className="text-[11px] font-black uppercase tracking-[0.1em] text-slate-900 dark:text-white leading-tight truncate">{user.name}</h2>
                   <p className="text-[8px] text-emerald-500 font-bold uppercase tracking-widest leading-tight">{user.designation || user.role}</p>
-                  <p className="text-[7px] text-slate-400 dark:text-slate-500 uppercase tracking-tighter mt-1">Emp ID: {user.id}</p>
+                  <p className="text-[7px] text-[#eaebec] uppercase tracking-tighter mt-1">Emp ID: {user.id}</p>
                 </div>
                 <button 
                   onClick={() => setIsSidebarOpen(false)}
                   className="w-10 h-10 rounded-xl bg-slate-50 dark:bg-slate-800 flex items-center justify-center text-slate-500 hover:text-red-500 transition-all border border-slate-200 dark:border-slate-700 shrink-0 ml-4"
                 >
-                  <X className="w-5 h-5" />
+                  <X className="w-5 h-5 text-[#bf4391]" />
                 </button>
               </div>
 
@@ -189,7 +189,7 @@ export default function DashboardLayout({
       </AnimatePresence>
       
       <div className="flex-1 overflow-y-auto">
-        <div className="p-4 pt-10 relative max-w-lg mx-auto w-full pb-20">
+        <div className="px-4 pt-5 pb-5 relative max-w-[1600px] mx-auto w-full">
            {children}
         </div>
       </div>
