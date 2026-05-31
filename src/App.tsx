@@ -5,6 +5,7 @@ import AdminDashboard from './components/AdminDashboard';
 import { supabase } from './lib/supabase';
 import { Employee } from './types';
 import { ThemeProvider } from './context/ThemeContext';
+import { Analytics } from '@vercel/analytics/react';
 
 const pendingProfileFetches = new Map<string, Promise<boolean>>();
 
@@ -306,6 +307,7 @@ export default function App() {
 
   return (
     <ThemeProvider>
+      <Analytics />
       {isLoading ? (
         <div className="min-h-screen bg-[var(--background)] flex items-center justify-center font-sans transition-colors duration-500">
           <div className="flex flex-col items-center gap-6 max-w-xs text-center">
