@@ -189,7 +189,10 @@ export default function DashboardLayout({
       </AnimatePresence>
       
       <div className="flex-1 overflow-y-auto">
-        <div className="px-4 pt-5 pb-5 relative max-w-[1600px] mx-auto w-full">
+        <div 
+          className="px-4 pt-5 pb-5 relative max-w-[1600px] mx-auto w-full"
+          style={{ paddingLeft: '6px', paddingRight: '6px', width: '340.453px' }}
+        >
            {children}
         </div>
       </div>

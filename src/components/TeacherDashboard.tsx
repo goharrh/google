@@ -639,11 +639,21 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
       else setSections([{ id: 1, section_name: 'A' }, { id: 2, section_name: 'B' }]);
 
       // Fetch classes assigned to this teacher
-      const { data: assignments, error } = await supabase
+      let { data: assignments, error } = await supabase
         .from('teacher_class_assignment')
         .select('id, class_id, section_id')
         .eq('teacher_id', user.id)
         .eq('emis', user.emis);
+
+      if ((!assignments || assignments.length === 0) && !error) {
+        const fallbackRes = await supabase
+          .from('teacher_class_assignment')
+          .select('id, class_id, section_id')
+          .eq('teacher_id', user.id);
+        if (fallbackRes.data && fallbackRes.data.length > 0) {
+          assignments = fallbackRes.data;
+        }
+      }
 
       if (error) throw error;
 
@@ -653,13 +663,23 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
             .map(a => Number(a.class_id))
             .filter(id => !isNaN(id) && id > 0)
         ));
-        const { data: classData, error: classError } = await supabase
+        let { data: classData, error: classError } = await supabase
           .from('classes')
           .select('*')
           .in('id', classIds)
           .eq('emis', user.emis);
+
+        if ((!classData || classData.length === 0) && classIds.length > 0) {
+          const fallbackClassRes = await supabase
+            .from('classes')
+            .select('*')
+            .in('id', classIds);
+          if (fallbackClassRes.data) {
+            classData = fallbackClassRes.data;
+          }
+        }
         
-        if (classError) throw classError;
+        if (classError && (!classData || classData.length === 0)) throw classError;
         
         // Map assignments to include section names
         const enrichedClasses = assignments.map(a => {
@@ -676,23 +696,44 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
         setAssignedClasses(enrichedClasses);
 
         // Fetch students counts for stats
-        const { data: studentsData } = await supabase
+        let { data: studentsData } = await supabase
           .from('students')
           .select('id, name, admission_no, class_id, gender')
           .in('class_id', classIds)
           .eq('emis', user.emis);
+
+        if ((!studentsData || studentsData.length === 0) && classIds.length > 0) {
+          const fallbackStudentsRes = await supabase
+            .from('students')
+            .select('id, name, admission_no, class_id, gender')
+            .in('class_id', classIds);
+          if (fallbackStudentsRes.data) {
+            studentsData = fallbackStudentsRes.data;
+          }
+        }
         
         const total = studentsData?.length || 0;
         const boys = (studentsData || []).filter(s => s.gender === 'MALE' || s.gender === 'Male' || String(s.gender).toUpperCase() === 'MALE').length;
         const girls = (studentsData || []).filter(s => s.gender === 'FEMALE' || s.gender === 'Female' || String(s.gender).toUpperCase() === 'FEMALE').length;
         
         // Fetch today's attendance summary for these students
-        const { data: attendanceStats } = await supabase
+        let { data: attendanceStats } = await supabase
           .from('student_attendance')
           .select('status, student_id, class_id')
           .in('class_id', classIds)
           .eq('date', today)
           .eq('emis', user.emis);
+
+        if ((!attendanceStats || attendanceStats.length === 0) && classIds.length > 0) {
+          const fallbackAttRes = await supabase
+            .from('student_attendance')
+            .select('status, student_id, class_id')
+            .in('class_id', classIds)
+            .eq('date', today);
+          if (fallbackAttRes.data) {
+            attendanceStats = fallbackAttRes.data;
+          }
+        }
 
         // Identify which class IDs have at least one attendance record today
         const markedClassIds = new Set<number>();
